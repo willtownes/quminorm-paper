@@ -1,0 +1,155 @@
+---
+title: "Quasi-UMIs for Patel 2014 Glioblastoma dataset"
+author: "Will Townes"
+date: "4/10/2019"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(glmpca)
+library(dplyr)
+library(ggplot2); theme_set(theme_bw())
+source("./algs/quminorm.R") #also loads nblomax.R,poilog.R
+source("./algs/existing.R")
+fp<-file.path
+bp<-"./real/patel_2014"
+
+plt_dir<-fp(bp,"results/plots/qumi")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+apply quantile normalization
+
+```{r}
+sce0<-readRDS(fp(bp,"data/02_sce_all_genes_filtered_cells.rds"))
+cmeta<-colData(sce0)
+cc<-cmeta$sampleType=="SC"
+sce<-sce0[,cc]
+cmeta<-cmeta[cc,]
+m<-assay(sce,"tpm")
+gg<-Matrix::rowSums(m)>0
+sce<-sce[gg,]
+m<-m[gg,]
+#compute census counts, 95sec
+system.time(sce<-census_normalize(sce,assay_name="tpm"))
+#quantile normalize to QUMIs (Poisson-lognormal), 111sec
+system.time(qm<-quminorm_matrix(m,shape=2.0,lik="poilog"))
+assay(sce,"qumi_poilog")<-qm
+#quantile normalize to Poisson-Lomax, 608 sec
+system.time(qm<-quminorm_matrix(m,shape=1.0,lik="plomax"))
+assay(sce,"qumi_plomax")<-qm
+saveRDS(sce,file=fp(bp,"data/03_sce_filtered_cells_quminorm.rds"))
+```
+
+### Visualize effect of normalizations
+
+subset on genes used by Patel, generate summary statistics for plots
+
+```{r}
+#sce<-readRDS(fp(bp,"data/03_sce_filtered_cells_quminorm.rds"))
+gg<-scan(file=fp(bp,"extdata/genes_patel_used.txt"),what="character")
+sce2<-sce[gg,]
+
+cm<-as.data.frame(colData(sce2))
+batch<-as.character(cm$sample)
+batch[batch=="MGH26" & cm$instrument=="GLPB22-B5C"]<-"MGH26a"
+batch[batch=="MGH26" & cm$instrument=="HISEQ"]<-"MGH26b"
+pz<-1-Matrix::colMeans(assay(sce2,"tpm")>0)
+
+Yl2<-log2(1+assay(sce2,"tpm"))
+Ycc<-round(assay(sce2,"census_counts"))
+Ycc<-as.matrix(Ycc[rowSums(Ycc)>0,])
+Yqm<-as.matrix(assay(sce2,"qumi_poilog"))
+#Yqm<-as.matrix(assay(sce2,"qumi_plomax"))
+Ylqpm<-log2(1+1e6*t(t(Yqm)/colSums(Yqm)))
+```
+
+show normalizations don't align the two batches of MGH26
+
+```{r}
+ss<-sce[,cm$sample=="MGH26"]
+cm_ss<-colData(ss)
+cm_ss$batch<-batch[cm$sample=="MGH26"]
+sp<-split(rownames(cm_ss),cm_ss$batch)
+ncell<-20 #20 random cells from each batch
+cells<-unlist(lapply(sp,sample,ncell))
+res<-list()
+for(m in c("counts","tpm","census_counts","qumi_poilog")){
+  X<-assay(ss,m)
+  f<-function(i){
+    x<-X[,i]
+    data.frame(x=log10(x[x>0]),mth=m,cell=i,batch=cm_ss[i,"batch"])
+  }
+  res[[m]]<-do.call(rbind,lapply(cells,f))
+}
+pd<-do.call(rbind,res)
+levels(pd$mth)[levels(pd$mth)=="counts"] <- "read_counts"
+
+pd2<-subset(pd,mth!="qumi_poilog")
+pp<-fp(bp,"results/plots/qumi")
+ggplot(pd2,aes(x=x,group=cell,color=batch,alpha=batch))+geom_line(stat="density")+facet_wrap(~mth,scales="free",nrow=1)+xlab("log10(expression)")+scale_alpha_manual(values=c(1,.5))+theme(legend.position = "none")
+ggsave(fp(pp,"normalize_patel_distr.pdf"),width=8,height=3)
+
+#split plots into separate files for latex
+ggplot(subset(pd2,mth=="read_counts"),aes(x=x,group=cell,color=batch,alpha=batch))+geom_line(stat="density")+xlab("log10(expression)")+scale_alpha_manual(values=c(1,.5))+theme(legend.position = "none")
+ggsave(fp(pp,"normalize_patel_distr_rc.pdf"),width=3,height=3)
+
+ggplot(subset(pd2,mth=="tpm"),aes(x=x,group=cell,color=batch,alpha=batch))+geom_line(stat="density")+xlab("log10(expression)")+scale_alpha_manual(values=c(1,.5))+theme(legend.position = "none",axis.title.y=element_blank())
+ggsave(fp(pp,"normalize_patel_distr_tpm.pdf"),width=3,height=3)
+
+ggplot(subset(pd2,mth=="census_counts"),aes(x=x,group=cell,color=batch,alpha=batch))+geom_line(stat="density")+xlab("log10(expression)")+scale_alpha_manual(values=c(1,.5))+theme(legend.position = "none",axis.title.y=element_blank())
+ggsave(fp(pp,"normalize_patel_distr_census.pdf"),width=3,height=3)
+
+```
+
+dimension reduction
+
+```{r}
+res<-list()
+#PCA on log2(1+TPM)
+factors<-pca(Yl2,2)
+factors$method<-"pca_log_tpm" #"PCA on log2(1+TPM)"
+res[[1]]<-factors
+#GLM-PCA on Census Counts
+factors<-glmpca(Ycc,2,fam="poi")$factors
+factors$method<-"glmpca_cc" #"GLM-PCA on census counts"
+res[[2]]<-factors
+factors<-glmpca(Yqm,2,fam="poi")$factors
+factors$method<-"glmpca_qumi" #"GLM-PCA on QUMIs"
+res[[3]]<-factors
+factors<-pca(Ylqpm,2)
+factors$method<-"pca_log_qpm"
+res[[4]]<-factors
+for(i in seq_along(res)){
+  res[[i]]$zero_frac<-pz
+  res[[i]]$batch<-batch
+}
+pd<-do.call(rbind,res)
+write.table(pd,file=fp(bp,"results/qumi_glmpca_patel.txt"))
+
+pd %>% group_by(method) %>% summarize(pzcor=cor(zero_frac,dim1))
+```
+```
+  method       pzcor
+1 glmpca_cc   -0.579
+2 glmpca_qumi  0.262
+3 pca_log_tpm -0.955
+4 pca_log_qpm -0.942
+```
+correlations are 0.96 for PCA on log-TPM, 0.94 for PCA on log-QUMI per million, 0.58 for GLM-PCA on census counts, and 0.26 for GLM-PCA on QUMIs.
+```{r}
+#pd<-read.table(fp(bp,"results/qumi_glmpca_patel.txt"))
+pd<-subset(pd,method != "pca_log_qpm")
+pd$method<-factor(pd$method,levels=c("pca_log_tpm","glmpca_qumi","glmpca_cc"))
+#levels=c("PCA on log2(1+TPM)","GLM-PCA on census counts","GLM-PCA on QUMIs"))
+
+ggplot(pd,aes(x=dim1,y=dim2,color=batch))+geom_point()+facet_wrap(~method,nrow=2,scales="free")+theme(legend.position=c(.75,.2))+xlab("dimension 1")+ylab("dimension 2")
+ggsave(file=fp(plt_dir,"qumi_dimreduce_patel1.pdf"),width=6,height=4.5)
+
+ggplot(pd,aes(x=zero_frac,y=dim1,color=batch))+geom_point()+facet_wrap(~method,nrow=2,scales="free")+theme(legend.position=c(.75,.2))+xlab("zero fraction")+ylab("dimension 1")
+ggsave(file=fp(plt_dir,"qumi_dimreduce_patel2.pdf"),width=6,height=4.5)
+
+ggplot(subset(pd,method=="glmpca_qumi"),aes(x=dim1,y=dim2,color=batch))+geom_point()
+ggsave(file=fp(plt_dir,"qumi_dimreduce_patel3.pdf"),width=4.5,height=4)
+```

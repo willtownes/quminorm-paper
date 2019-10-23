@@ -1,0 +1,189 @@
+---
+title: "Data Preprocessing"
+author: "Will Townes"
+date: "3/24/2019"
+output: html_document
+---
+
+# Introduction
+
+This notebook is not meant to be compiled with knitr!
+
+This is a scratch space for notes on downloading SRA files, converting to FASTQ, and quantifying with Kallisto. Unless otherwise noted, **bash code should be run from a dataset-specific directory**, such as real/macosko_2015 or real/klein_2015, not real/utility or a parent directory. **R code should be run from the overall project directory.**
+
+All data is saved to data/original subfolder (eg data/original/sra, data/original/fastq, data/original/kallisto). When I say "Odyssey" below, I mean a university research cluster with a SLURM task scheduler, such as [Harvard Odyssey](https://www.rc.fas.harvard.edu/). Some of the instructions may also apply to the LSF style clusters (like the Partners Healthcare cluster), but I haven't tested that.
+
+## Prerequisites
+
+We assume there are three files in subfolder extdata: 
+* *sraFiles.txt*- list of SRA ids of the files to download 
+* *sraFilesPath.txt*- list of URLs for the download. 
+* *kallisto_cmd.txt*- list of kallisto commands, one line per dataset
+
+# Download SRA files
+
+Downloading all `.sra` files in the `sraFilesPath.txt`. There are two options for doing this.
+
+## sra toolkit prefetch
+
+Either `module load sratoolkit` on Odyssey or `brew install sratoolkit` on mac. This way is recommended as you can use Aspera connect which is faster than HTTPS. However you have to first install Aspera connect (ascp on command line) with `brew cask install aspera-connect` on mac. I didn't figure out how to install Aspera connect on Odyssey, but it's not that important since HTTPS is fast enough there. Practice download: use SRR390728 (small file) eg `prefetch -O data/original/sra SRR390728`. Useful links with info on ascp, prefetch etc command line flags:
+https://www.ncbi.nlm.nih.gov/books/NBK158898/
+https://download.asperasoft.com/download/docs/ascp/3.5.2/html/index.html
+
+Example download only the third (smallest) sample in macosko_2015 and force use of Aspera. Excluding --transport flag allows prefetch to use HTTPS as a backup.
+```{bash}
+prefetch --transport ascp --max-size 50G -O data/original/sra SRR1853180
+```
+Example of download all samples listed in extdata/sraFiles.txt. SRA files stored in ~/ncbi/public/sra if -O option not specified
+```{bash}
+prefetch --max-size 50G -O data/original/sra --option-file extdata/sraFiles.txt
+```
+This worked on mac, but not on Odyssey because the latter uses an old version of sratoolkit which didn't allow the `-O` flag. I didn't want to have a bunch of huge files stored in ~/ncbi/public/sra (the hard-coded storage location for sratoolkit) because we aren't allowed much disk space in the home directory, so I abandoned the use of prefetch. Note that you could theoretically make a symbolic link from ~/ncbi to an appropriate (large disk space) partition such that this method would still work but I didn't try it. 
+
+## wget
+
+This could be done by the *01_sra_download.slurm* script ie `sbatch -J sradownload ../util/01_sra_download.slurm` which contains the following command.
+```{bash}
+wget -c -nc -i extdata/sraFilesPath.txt -P data/original/sra
+```
+Another option: use curl. The old LSF way used *01_sra_download.lsf* ie `bsub -q normal < ../util/01_sra_download.lsf`.
+
+# Extract FASTQ from SRA files with fastq-dump
+
+At this point there should be a bunch of SRA files under data/original/sra and a file containing the SRA ids: `extdata/sraFiles.txt` (see above). Sratoolkit contains `fastq-dump` command with [many confusing flags](https://edwards.sdsu.edu/research/fastq-dump/). 
+Example with only one SRA file from macosko_2015
+```{bash}
+fastq-dump -I --split-files -O data/original/fastq --gzip data/original/sra/SRR1853178
+```
+Example with [parallel-fastq-dump](https://github.com/rvalieris/parallel-fastq-dump), which parallelizes within a single fastq file. Installing parallel-fastq-dump requires bioconda which was too much trouble to install on Odyssey.
+```{bash}
+parallel-fastq-dump --sra-id data/original/sra/SRR1853178.sra --threads 4 --outdir data/original/fastq -I --split-files --gzip
+```
+Since extracting fastq from sra is computationally intensive, I used [gnu-parallel](https://www.gnu.org/software/parallel/) to parallelize this process (across multiple fastq files, not the same as within-fastq parallelization of parallel-fastq-dump). On mac `brew install parallel` and on Odyssey `module load parallel`. Use the `-j` flag to specify the number of parallel processors (the min of number of cores on machine and number of SRA files). Both macosko_2015 and klein_2015 have <=8 SRA files. 
+```{bash}
+#Example commands
+#head -n 2 extdata/sraFiles.txt | parallel -j 2 fastq-dump -I --split-files -O data/original/fastq --gzip data/original/sra/{}
+#command for paired end, not applicable for Islam et al which used SINGLE END
+parallel -j 8 fastq-dump -I --split-files -O data/original/fastq --gzip data/original/sra/{} < extdata/sraFiles.txt
+#equivalently 
+cat extdata/sraFiles.txt | parallel -j 8 fastq-dump -I --split-files -O data/original/fastq --gzip data/original/sra/{}
+# these options split into one FASTQ file for each end of the read
+# for single end data, no need for -I and --split-files (??)
+#cat extdata/sraFiles.txt | parallel -j 16 fastq-dump -O data/original/fastq --gzip data/original/sra/{}
+```
+This is implemented in *02_fastq_dump.slurm* so just run `sbatch -J fastqdump ../util/02_fastq_dump.slurm` on Odyssey.
+
+# Pseudoalignment with Kallisto
+
+We assume Kallisto version >=0.45 so we can produce BUS files. Kallisto can be installed either with homebrew on mac or for linux direct download, for example:
+```{bash}
+pushd ~/software
+wget https://github.com/pachterlab/kallisto/releases/download/v0.45.1/kallisto_linux-v0.45.1.tar.gz
+tar -xzf kallisto_linux-v0.45.1.tar.gz
+cd ~/bin
+ln -s ~/software/kallisto_linux-v0.45.1/kallisto
+popd
+```
+
+## Create Kallisto Index Files from Transcriptome
+
+Skip this step if already downloaded for another dataset with the same species. ** Run this from the TOP-LEVEL directory ** (sc-rna-seq), not macosko_2015, klein_2015, etc. We first tried directly downloading the prebuilt indices from kallisto website.
+```{bash}
+wget https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/94/Homo_sapiens.GRCh38.cdna.all.release-94_k31.idx.gz -P resources
+wget https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/94/Mus_musculus.GRCm38.cdna.all.release-94_k31.idx.gz -P resources
+```
+but this threw an error when we used it with kallisto. So we had to build the indices from the original FASTA files from ENSEMBL. First download the transcriptomes.
+```{bash}
+pushd ../.. #navigate to top level directory from eg real/macosko_2015
+wget ftp://ftp.ensembl.org/pub/release-95/fasta/homo_sapiens/cdna/Homo_sapiens.GRCh38.cdna.all.fa.gz -P resources
+wget ftp://ftp.ensembl.org/pub/release-95/fasta/mus_musculus/cdna/Mus_musculus.GRCm38.cdna.all.fa.gz -P resources
+```
+create index files
+```{bash}
+kallisto index -i resources/Homo_sapiens_GRCh38.idx resources/Homo_sapiens.GRCh38.cdna.all.fa.gz
+kallisto index -i resources/Mus_musculus_GRCm38.idx resources/Mus_musculus.GRCm38.cdna.all.fa.gz
+#return to dataset directory
+popd
+```
+create transcript-to-gene maps using R package [BUSpaRse](https://github.com/BUStools/BUSpaRse)
+```{r}
+hs<-BUSpaRse::tr2g_fasta("./resources/Homo_sapiens.GRCh38.cdna.all.fa.gz")
+write.table(hs,"./resources/tr2g_ensembl95_Homo_sapiens.txt",row.names=FALSE,quote=FALSE)
+mm<-BUSpaRse::tr2g_fasta("./resources/Mus_musculus.GRCm38.cdna.all.fa.gz")
+write.table(mm,"./resources/tr2g_ensembl95_Mus_musculus.txt",row.names=FALSE,quote=FALSE)
+```
+
+## Use job array to produce kallisto bus files from fastq files
+
+The [BUS file format](https://github.com/BUStools/BUS-format) is recommended by Kallisto folks for single cell data. It is a tabular format with columns for each cell barcode (B), unique molecular identifier (U) and equivalence class set (S). Each row represents a mapping between a UMI in a cell and a set of possible transcripts it could have come from. There are also auxiliary files containing the mapping of equivalence classes to transcript IDS.
+
+Example of running kallisto on single sample (from macosko_2015):
+```{bash}
+#macosko_2015 (mouse)
+kallisto bus -x DropSeq -t 8 -i ../../resources/Mus_musculus_GRCm38.idx -o data/original/kallisto data/original/fastq/SRR1853178_1.fastq.gz data/original/fastq/SRR1853178_2.fastq.gz
+```
+
+parallel process all samples in a given dataset using slurm script *03_kallisto.slurm*:
+```{bash}
+mkdir -p data/original/kallisto
+sbatch --array=1-$(wc -l < extdata/kallisto_cmd.txt) ../util/03_kallisto.slurm
+```
+
+# Process BUS files
+
+Install [bustools](https://github.com/BUStools/bustools). 
+
+## Sort and convert to text
+
+Sort file by cell barcode and UMI then convert from binary to text representation. Example with a Klein SRA ID:
+```{bash}
+srr=SRR1784310
+pth=./data/original/kallisto
+bustools sort -t4 -o $pth/$srr/output_sort.bus $pth/$srr/output.bus
+bustools text -o $pth/$srr/output_sort.txt $pth/$srr/output_sort.bus
+```
+Process all samples in a dataset as a slurm batch job with *04_busfiles.slurm* (ie `sbatch -J busfiles ../util/04_busfiles.slurm`. This will also compress the whole directory structure into a zip file (excluding the massive binary .bus files) for convenient download/upload. The zip file will be stored under data/original/kallisto.tar.gz
+
+## Collapse equivalence classes to gene counts
+
+### All samples
+
+If only UMI counts are needed, this functionality is already provided by the BUSpaRse package in function *make_sparse_matrix*. We duplicate this function as *ec2counts* in the data_loading.R module so that we can get read counts in addition to UMI counts. The values of the latter should agree between the two functions. Our function returns the sparse matrix in the compact COO format rather than the matrix itself. 
+
+Key functions are in *./real/util/data_loading.R*. To process all samples in a dataset, use the *05_bus2genecounts.R* script or submit batch job (same R code) from top-level project directory with, for example `sbatch -J bus2gene ./real/util/05_bus2genecount.slurm ./real/klein_2015`.
+
+Compress the resulting files for convenient download:
+```
+pushd data/original
+tar -czvf genecounts.tar.gz genecounts
+popd
+```
+
+### Single sample illustration
+
+Example for a single SRA ID (from Klein 2015)
+```{r}
+srr="SRR1784314"
+pth<-fp(bp,"data/original/kallisto",srr)
+system.time(res<-ec2counts(pth,"Mus musculus",ensembl_version=95,verbose=TRUE))
+```
+
+convert to sparse matrix
+```{r}
+res$gene<-factor(res$gene); res$bc<-factor(res$bc)
+m<-sparseMatrix(i=as.integer(res$gene),j=as.integer(res$bc),x=res$umi_ct)
+rownames(m)<-levels(res$gene); colnames(m)<-levels(res$bc)
+```
+
+compare to the bustools BUSpaRse functions for UMI counts
+```{r}
+#tr2g<-fread("./resources/tr2g_ensembl95_Mus_musculus.txt")
+system.time(m2<-BUSpaRse::make_sparse_matrix(fp(pth,"output_sort.txt"),tr2g=tr2g,est_ncells=ncol(m),est_ngenes=nrow(m),TCC=FALSE))
+
+setequal(colnames(m2),colnames(m)) #should be true
+setequal(rownames(m),rownames(m2))
+m2<-m2[rownames(m),colnames(m)]
+all(rowSums(m)==rowSums(m2))
+all(colSums(m)==colSums(m2))
+max(abs(m2-m)) #should be close to zero
+```

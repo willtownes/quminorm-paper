@@ -1,0 +1,96 @@
+---
+title: "Quasi-UMIs for Zeisel 2015"
+author: "Will Townes"
+output: html_document
+---
+
+Estimate poisson-lomax, poisson-lognormal, and negative binomial (poisson-gamma) parameters for each cell
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+# library(ggplot2); theme_set(theme_bw())
+source("./algs/quminorm.R") #also loads nblomax.R
+source("./algs/poilog.R")
+fp<-file.path
+bp<-"./real/zeisel_2015"
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)) dir.create(plt_dir,recursive=TRUE)
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+m<-counts(sce)
+```
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+i<-1200
+colnames(m)[i] #cell ID="cell1146"
+#set.seed(222)
+#i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+res<-lpmf(x,doplot=FALSE)
+xmax<-expm1(7.0)
+
+fpoilog<-function(t){
+  sads::dpoilog(floor(exp(t)),mu=th[1],sig=th[2],log=TRUE)
+}
+fplomax<-function(t){
+  dplomax(floor(exp(t)),tail=th2[1],scale=th2[2],log=TRUE,quadpts=5000)
+}
+
+pdf(file=fp(plt_dir,"lpmf_llcurve_zeisel.pdf"),width=5,height=5)
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(-18,0),xlim=c(-log(2),log(xmax)),cex=1.2)
+curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=2)
+curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=2,lty=2)
+points(rep(-log(2),2),c(fpoilog(-Inf),fplomax(-Inf)),col=c("blue","green"),pch=c(1,19),cex=c(.8,.3))
+legend("topright",c("Poisson-lognormal","Poisson-Lomax"),col=c("blue","green"),lty=c(1,2),lwd=2)
+dev.off()
+```
+
+Compute MLEs for all cells `time Rscript ./real/util/mles_qumi.R ./real/zeisel_2015` or `sbatch -J zeisel ./real/util/mles_qumi.slurm ./real/zeisel_2015`
+
+```{r}
+nb<-read.table(fp(bp,"data/mle_nb.txt"),header=TRUE)
+lx<-read.table(fp(bp,"data/mle_poilomax.txt"),header=TRUE)
+ln<-read.table(fp(bp,"data/mle_poilog.txt"),header=TRUE)
+good<-!is.na(lx$tail) & !is.na(ln$mu) & !is.na(nb$size)
+table(good) #all good
+#when is poilog best?
+mean(ln$bic<pmin(lx$bic,nb$bic))
+#when is poisson-lomax best?
+mean(lx$bic<pmin(ln$bic,nb$bic))
+#nb best?
+mean(nb$bic<pmin(ln$bic,lx$bic))
+```
+
+Based on BIC, in 91% of cells, Poisson-lognormal fits best. In 0.1% of cells Poisson-lomax fits best. In 8.9% of cells, negative binomial fits best.
+
+Comparing fitted MLEs to summary statistics
+
+```{r}
+cm<-colData(sce)
+z<-log10(colSums(m))
+hist(ln$sig,breaks=100)
+boxplot(ln$sig~cm$tissue)
+boxplot(ln$sig~cm$level1class)
+plot(z,ln$sig)
+plot(z,ln$mu)
+
+hist(lx$tail,breaks=100)
+boxplot(lx$tail~cm$tissue)
+boxplot(lx$tail~cm$level1class)
+plot(z,lx$tail)
+plot(z,log(lx$scale))
+
+hist(nb$size,breaks=100)
+boxplot(nb$size~cm$tissue)
+boxplot(nb$size~cm$level1class)
+```
+
+For neg binom, the size parameter ranges from .05 to .2 with .12 a typical value. For poisson-lognormal the sig parameter ranges from 1.8-3.0 with typical value 2.2. For poisson-lomax the tail parameter distribution is bimodal with peaks at 0.9 and 2.0. The bimodality in the neg binom size parameter is driven by cell type but not the bimodality in the poi lomax tail parameter.

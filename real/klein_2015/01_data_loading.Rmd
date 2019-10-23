@@ -1,0 +1,95 @@
+---
+title: "Klein et al 2015 InDrops"
+output: html_document
+---
+
+```{r}
+library(SingleCellExperiment)
+library(Matrix)
+source("./real/util/data_loading.R") #loads data.table
+fp<-file.path
+bp<-"./real/klein_2015"
+```
+
+# Overview 
+This is the code to produce a *SingleCellExperiment* object of the indrop scRNA-Seq experiment by Klein et al. (2015) and GEO accession [GSE65525](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE65525).
+
+Summary 	Recently, RNA sequencing has achieved single cell resolution, but what is limiting is an effective way to routinely isolate and process large numbers of individual cells for in-depth sequencing, and to do so quantitatively. We have developed a droplet-microfluidic approach for parallel barcoding thousands of individual cells for subsequent RNA profiling by next-generation sequencing. This high-throughput method shows a surprisingly low noise profile and is readily adaptable to other sequencing-based assays. Using this technique, we analyzed mouse embryonic stem cells, revealing in detail the population structure and the heterogeneous onset of differentiation after LIF withdrawal. The reproducibility and low noise of this high-throughput single cell data allowed us to deconstruct cell populations and infer gene expression relationships.
+
+Overall design 	A total of 8 single cell data sets are submitted: 3 for mouse embryonic stem (ES) cells (1 biological replicate, 2 technical replicates); 3 samples following LIF withdrawal (days 2,4, 7); one pure RNA data set (from human lymphoblast K562 cells); and one sample of single K562 cells.
+
+# Download processed UMI counts from Hemberg website
+
+Hemberg provides the SingleCellExperiment object with the UMI counts with quality control already done: https://hemberg-lab.github.io/scRNA.seq.datasets/mouse/esc/
+
+```{bash}
+wget https://scrnaseq-public-datasets.s3.amazonaws.com/scater-objects/klein.rds -P data
+```
+
+```{r}
+sce<-readRDS(fp(bp,"data/klein.rds"))
+cm<-colData(sce)
+colData(sce)<-cm[,c("cell_type1","total_counts")]
+assay(sce,"logcounts")<-NULL
+gm<-rowData(sce)
+rowData(sce)<-gm[,c("feature_symbol","total_counts")]
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+the above approach only gets UMI counts. To get read counts, see below.
+
+
+# Getting metadata
+
+The information which connects the sample information from GEO with the SRA run id is downloaded from [SRA](https://www.ncbi.nlm.nih.gov/sra?term=SRP053052) using the **Send to: File button**.
+
+```{r}
+spp<-list("Homo_sapiens_GRCh38.idx","Mus_musculus_GRCm38.idx")
+names(spp)<-c("Homo sapiens","Mus musculus")
+parse_sra_csv(bp,"inDrops",spp) #from ../util/data_loading.R
+```
+
+# Processing FASTQs into BUS files with Kallisto
+
+Refer to *../util/preprocessing.Rmd* for how to download the files, convert to fastq format, pseudoalign with kallisto, and process the resulting bus files with bustools.
+
+# Remove empty droplets and combine samples
+
+## Download barcode whitelist
+
+Note- this approach didn't work out. Valid barcodes are listed here: https://github.com/indrops/indrops/tree/master/ref/barcode_lists
+
+```{bash}
+wget https://raw.githubusercontent.com/indrops/indrops/master/ref/barcode_lists/gel_barcode1_list.txt -P extdata
+wget https://raw.githubusercontent.com/indrops/indrops/master/ref/barcode_lists/gel_barcode2_list.txt -P extdata
+```
+
+```{r}
+bc1<-scan(fp(bp,"extdata/gel_barcode1_list.txt"),character())
+bc2<-scan(fp(bp,"extdata/gel_barcode2_list.txt"),character())
+ref<-expand.grid(bc1=bc1,bc2=bc2)
+ref$pattern<-paste0("^",ref$bc1,ref$bc2)
+
+d<-scan(fp(bp,"barcodes.txt"),character())
+a<-grep("^AAACAAACAAACAAAC",d,perl=TRUE)
+system.time(res<-lapply(paste0("^",bc1),grep,d,perl=TRUE))
+d2<-d[unique(unlist(res))]
+system.time(res2<-lapply(ref$pattern,grep,d2,perl=TRUE))
+d3<-d2[unique(unlist(res2))]
+```
+
+```{r}
+tc_cut<-200 #minimum number of total UMIs for keeping
+dg_cut<-100 #minimum number of detected genes for keeping
+coldata<-fread(fp(bp,"extdata/coldata.txt"))
+i<-1
+srr<-coldata$Run[i]
+d<-fread(fp(bp,"data/original/genecounts",paste0(srr,".txt")))
+x<-d[,.(tc=sum(umi_ct),dg=length(gene)),bc]
+```
+
+# Session information
+
+```{r}
+sessionInfo()
+```

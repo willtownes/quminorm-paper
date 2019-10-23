@@ -1,0 +1,184 @@
+---
+title: "Quasi-UMIs for Tung 2016"
+author: "Will Townes"
+date: "4/10/2019"
+output: html_document
+---
+
+Exploring reads vs UMIs with goal of normalizing read counts to quasi-UMIs
+
+* Estimate discrete power law distribution for many UMI samples
+* Quantile normalize read counts to quasi UMI counts
+* Compare qumi distribution to actual UMI distribution
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(ggplot2); theme_set(theme_bw())
+library(ggridges)
+source("./algs/quminorm.R") #also loads nblomax.R,poilog.R
+fp<-file.path
+bp<-"./real/tung_2016"
+
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+m<-counts(sce)
+rc<-assay(sce,"read_counts")
+```
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+#i<-1
+i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+(th3<-nb_mle(x))
+lpmf(x)
+llcurve_poilog(max(x),th,col="blue",lwd=2)
+llcurve_lomax(max(x),th2,lik="poi",col="green",lty=2,lwd=2,q=5000)
+llcurve_nb(max(x),th3,col="red",lty=3,lwd=2)
+legend("topright",c("poisson-lognormal","poisson-lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=2)
+```
+
+make lpmf plots for all cells
+
+```{r}
+f<-function(t){
+  df<-lpmf(m[,t],doplot=FALSE)
+  df$id<-t
+  df
+}
+res<-do.call(rbind,lapply(seq.int(ncol(m)),f))
+ggplot(res,aes(x=x,y=y,group=id))+geom_line(alpha=.1)+xlab("log(1+x)")+ylab("log(density)")
+ggsave(fp(plt_dir,"lpmf_allcells_tung.pdf"),width=6,height=4)
+```
+
+apply QUMI to entire data matrix 
+
+```{bash}
+Rscript ./real/util/quminorm_script.R ./real/tung_2016/data/01_sce_all_genes_all_cells.rds ./real/tung_2016/data/02_sce_qumi.rds
+```
+or 
+```{bash}
+sbatch -J tung ./real/util/quminorm_script.slurm ./real/tung_2016/data/01_sce_all_genes_all_cells.rds ./real/tung_2016/data/02_sce_qumi.rds
+```
+
+For sensitivity analysis, additional poilog quminorm with sig=1.0 instead of 2.0
+
+```{r}
+sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+#1 minute
+system.time(assay(sce2,"qumi_poilog1")<-quminorm_matrix(rc,1.0,lik="poilog"))
+saveRDS(sce2,file=fp(bp,"data/02_sce_qumi.rds"))
+```
+
+Show existing normalizations don't align distributions of technical replicates
+
+```{r}
+sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+cm<-colData(sce2)
+ss<-sce2[,cm$individual=="NA19098" & cm$replicate=="r3"]
+ncell<-20
+ss<-ss[,sample.int(ncol(ss),ncell)]
+cellnames<-paste0("cell",1:ncell)
+res<-list()
+for(m in c("read_counts","census_counts","cpm","scran_counts","counts","qumi_poilog")){
+  X<-assay(ss,m)
+  f<-function(i){
+    x<-X[,i]
+    data.frame(x=log10(x[x>0]),mth=m,cell=cellnames[i])
+  }
+  res[[m]]<-do.call(rbind,lapply(seq.int(ncol(ss)),f))
+}
+pd<-do.call(rbind,res)
+levels(pd$mth)[levels(pd$mth)=="counts"] <- "umi_counts"
+
+pd2<-subset(pd,mth %in% c("read_counts","cpm","census_counts"))
+pd2$mth<-factor(pd2$mth,levels=c("read_counts","cpm","census_counts"))
+ggplot(pd2,aes(x=x,group=cell))+geom_density(alpha=.9)+facet_wrap(~mth,scales="free")+xlab("log10(expression)")
+ggsave(fp(bp,"results/fig/normalize_tung_distr.pdf"),width=8,height=3)
+
+#split plots into separate files for latex
+ggplot(subset(pd2,mth=="read_counts"),aes(x=x,group=cell))+geom_density(alpha=.9)+xlab("log10(expression)")
+ggsave(fp(bp,"results/fig/normalize_tung_distr_rc.pdf"),width=3,height=3)
+
+ggplot(subset(pd2,mth=="cpm"),aes(x=x,group=cell))+geom_density(alpha=.9)+xlab("log10(expression)")
+ggsave(fp(bp,"results/fig/normalize_tung_distr_cpm.pdf"),width=3,height=3)
+
+ggplot(subset(pd2,mth=="census_counts"),aes(x=x,group=cell))+geom_density(alpha=.9)+xlab("log10(expression)")
+ggsave(fp(bp,"results/fig/normalize_tung_distr_census.pdf"),width=3,height=3)
+```
+
+compare distances between normalizations for all cells. Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
+
+```{r}
+#sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+res<-distance_compare(sce2)
+#sce3<-sce2
+#assays(sce3)<-assays(sce2)[c("counts","qumi_poilog1")]
+#res2<-distance_compare(sce3)
+#res$qumi_poilog1<-res2$qumi_poilog1
+write.table(res,file=fp(bp,"results/qumi_distance.txt"),quote=FALSE,row.names=FALSE)
+```
+
+```{r}
+#i<-sample.int(ncol(rc),size=1)
+umi<-m[,i]
+x<-rc[,i]
+#poisson-lomax qumi
+(th<-plomax_mle(umi,quadpts=1000))
+xqumi<-quminorm_plomax(x,shape=th[1],sc=th[2])
+#poisson-lognormal qumi
+(th2<-poilog_mle(umi))
+xqumi2<-quminorm_poilog(x,shape=th2[2],sc=th2[1])
+#negative binomial qumi
+(th3<-nb_mle(umi))
+xqumi3<-quminorm_nb(x,shape=th3[1],sc=th3[2])
+#plot qumi distributions and compare to actual UMI
+lpmf(xqumi,type="l",col="green",lty=2,lwd=2)
+lpmf(umi,add=TRUE,type="p",cex=2)
+lpmf(xqumi2,add=TRUE,type="l",col="blue",lty=1,lwd=2)
+lpmf(xqumi3,add=TRUE,type="l",col="red",lty=3,lwd=2)
+cc<-ceiling(assay(sce2,"census_counts")[,i])
+lpmf(cc,add=TRUE,type="l",col="orange",lty=2,lwd=2)
+legend("topright",c("negative binomial","poisson-lognormal","poisson-lomax","census counts"),lty=c(3,1,2,2),col=c("red","blue","green","orange"),lwd=2)
+title("Quasi-UMIs vs Actual UMIs")
+```
+
+```{r}
+#Poisson-lomax tends to overestimate
+plot(log1p(umi),log1p(xqumi),main="Poisson-Lomax Quasi-UMIs")
+abline(0,1)
+#neg binom tends to underestimate
+plot(log1p(umi),log1p(xqumi3),main="Negative Binomial Quasi-UMIs")
+abline(0,1)
+#Poisson-lognormal does well
+plot(log1p(umi),log1p(xqumi2),main="Poisson-Lognormal Quasi-UMIs")
+abline(0,1)
+#census counts
+plot(log1p(umi),log1p(cc),main="Census Counts")
+abline(0,1)
+```
+
+#see if quasi-UMI improves over other normalizations
+
+graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
+
+```{r}
+library(tidyverse)
+res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
+pd<-tidyr::gather(res,key="method",value="distance",-cell)
+pd<-subset(pd,method!="counts")
+pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance))
+o<-order(pd2$med_dist)
+pd$method<-factor(pd$method,levels=pd2$method[o])
+ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"dist_comp_tung.pdf"),width=6,height=4)
+```

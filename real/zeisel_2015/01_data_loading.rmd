@@ -1,0 +1,81 @@
+---
+title: "Zeisel et al 2015 Data Loading"
+output: html_document
+---
+
+```{r}
+library(SingleCellExperiment)
+source("./util/txtparse.R")
+source("./util/functions_genefilter.R")
+fp<-file.path
+bp<-"./real/zeisel_2015"
+
+rm_zero_rowcol<-function(Y){
+  #remove all rows and columns containing all zeros
+  Y<-Y[rowSums(Y>0)>0,] #remove rows with zeros all the way across
+  Y<-Y[,colSums(Y>0)>0]
+  Y
+}
+```
+
+#### Overview 
+This is the code to produce a *SingleCellExperiment* object of the scRNA-Seq experiment by Zeisel et al. (2015) and GEO accession [GSE60361](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE60361). 
+
+#### Citation 
+Zeisel A, Muñoz-Manchado AB, Codeluppi S, Lönnerberg P et al. Brain structure. Cell types in the mouse cortex and hippocampus revealed by single-cell RNA-seq. Science 2015 Mar 6;347(6226):1138-42. 
+PMID: 25700174
+
+#### Description extracted from GEO: 
+We have applied a recently developed, highly accurate and sensitive single-cell RNA-seq method (STRT/C1) to perform a molecular census of two regions of the mouse cerebral cortex: the somatosensory cortex and hippocampus CA1. We isolated cells fresh from somatosensory cortex (S1) and hippocampus CA1 area of juvenile (P22 - P32) CD1 mice, 33 males and 34 females. Cells were collected without selection, except that 116 cells were obtained by FACS from 5HT3a-BACEGFP transgenic mice. A total of 76 Fluidigm C1 runs were performed, each attempting 96 cell captures and resulting in 3005 high-quality single-cell cDNAs, containing Unique Molecular Identifiers allowing counting of individual mRNA molecules, even after PCR amplification.
+
+### Data Download
+
+Download alternative expression matrix from [Linarsson Lab website](http://linnarssonlab.org/cortex/):
+
+```
+wget -P data https://storage.googleapis.com/linnarsson-lab-www-blobs/blobs/cortex/expression_mRNA_17-Aug-2014.txt
+```
+
+```{r}
+#loading/parsing
+rna<-read.delim(fp(bp,"data/expression_mRNA_17-Aug-2014.txt"))
+cmeta<-as.data.frame(t(rna[1:9,3:ncol(rna)]))
+colnames(cmeta)<-gsub(" ","_",rna[1:9,2])
+colnames(cmeta)<-gsub("#","",colnames(cmeta))
+m<-as.matrix(rna[11:nrow(rna),3:ncol(rna)])
+m<-matrix(as.numeric(m),nrow=nrow(m))
+#m<-Matrix(as.numeric(m),dim(m)[1]) #sparse matrix
+cmeta$tissue<-gsub("\\.\\d+","",rownames(cmeta))
+rownames(cmeta)<-cmeta$cell_id
+colnames(m)<-rownames(cmeta)
+cmeta$plate<-factor(split2mat(cmeta$cell_id,"_")[,1])
+for(i in names(cmeta)){
+  names(cmeta[[i]])<-NULL
+}
+gmeta<-data.frame(gene_cluster=rna[11:nrow(rna),2])
+rownames(gmeta)<-rna[11:nrow(rna),1]
+rownames(m)<-rownames(gmeta)
+#basic QC following Zeisel Supplement (p.5)
+good<-colSums(m)>2500 #filter cells
+m<-m[,good]; cmeta<-cmeta[good,]
+gg<-rowSums(m>0)>0
+gmeta<-gmeta[gg,]
+m<-m[gg,]
+cmeta$detection<-colSums(m>0)
+cmeta$total_umi<-colSums(m)
+sce<-SingleCellExperiment(assays=list(counts=m),colData=cmeta,rowData=gmeta)
+saveRDS(sce,file=fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+### Normalization
+
+Scran size factors
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+cl<-scran::quickCluster(sce)
+sce<-scran::computeSumFactors(sce,clusters=cl)
+sce<-scater::normalize(sce)
+#logcounts assay created, is log2(1+counts/scran size factor)
+```
+

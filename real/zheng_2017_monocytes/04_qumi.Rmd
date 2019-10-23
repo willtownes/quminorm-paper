@@ -1,0 +1,313 @@
+---
+title: "Quasi-UMIs for Zheng 2017 Monocytes dataset"
+author: "Will Townes"
+date: "4/10/2019"
+output: html_document
+---
+
+Exploring reads vs UMIs with goal of normalizing read counts to quasi-UMIs
+
+* Estimate discrete power law distribution for many UMI samples
+* Quantile normalize read counts to quasi UMI counts
+* Compare qumi distribution to actual UMI distribution
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(ggplot2); theme_set(theme_bw())
+library(ggridges)
+source("./algs/quminorm.R") #also loads nblomax.R,poilog.R
+fp<-file.path
+bp<-"./real/zheng_2017_monocytes"
+
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+m<-counts(sce)
+rc<-assay(sce,"read_counts")
+cm<-colData(sce)
+cm$zero_frac<-1-colMeans(m>0)
+```
+
+Of genes with 1 UMI, how many read counts?
+
+```{r}
+o<-order(cm$zero_frac)
+ubo<-colnames(m)[o]
+ncells<-3
+cells<-ubo[1:ncells] #seq(from=1,to=length(ubo),length.out=ncells)]
+
+f<-function(t,K=4){
+  u<-m[,t]
+  r<-rc[,t]
+  pz<-cm[t,"zero_frac"]
+  g<-function(k){
+    data.frame(cell=t,reads=r[which(u==k)],zero_frac=pz,umi=k)
+  }
+  do.call(rbind,lapply(1:K,g))
+}
+res<-lapply(cells,f)
+pd<-do.call(rbind,res)
+
+pd2<-subset(pd,cell %in% cells)
+pd2$cell<-factor(pd2$cell,levels=cells)
+ggplot(pd2,aes(x=reads,y=umi,group=umi,fill=umi))+geom_density_ridges(stat="binline",bins=30,scale=0.95,draw_baseline=FALSE)+facet_wrap(~cell,scales="fixed")+scale_y_reverse()+scale_fill_continuous(low="blue",high="red")+theme(legend.position = "none")+xlab("read counts")+ylab("UMI counts")
+#alternative visualization treating UMI counts as categorical
+pd2$umi_cat<-paste(pd2$umi,"UMIs")
+pd2$umi_cat[pd2$umi_cat=="1 UMIs"]<-"1 UMI"
+
+ggplot(pd2,aes(x=reads,y=umi_cat,group=umi_cat,fill=umi_cat))+geom_density_ridges(stat="binline",bins=30,scale=0.95,draw_baseline=FALSE)+facet_wrap(~cell,scales="fixed")+theme(legend.position = "none")+xlab("read counts")+ylab(element_blank())
+
+ggsave(fp(plt_dir,"reads_per_umi_monocytes.pdf"),width=7,height=4)
+
+#ggplot(pd2,aes(x=factor(umi),y=reads,fill=cell))+geom_boxplot()+theme(legend.position = "none")
+#ggplot(pd2,aes(x=umi,y=reads))+geom_point()+geom_smooth(method="lm")+facet_wrap(~cell)+xlim(c(0,25))
+
+#ggplot(pd2,aes(x=reads,y=cell,fill=zero_frac))+geom_density_ridges(stat = "binline", bins = 20, scale = .5, draw_baseline = FALSE)+scale_x_log10()+xlab("reads from genes with single UMI")+scale_fill_continuous(low="blue",high="red")+theme(axis.text.y=element_blank())
+#ggsave(fp(plt_dir,"reads_per_umi_monocytes.pdf"),width=6,height=4)
+```
+
+distribution of read counts per umi, by cell
+
+```{r}
+bc<-substr(cm$Barcode,1,nchar(cm$Barcode)-2) #assumes barcode ends in "-1"
+cm$bc_enc<-DropletUtils::encodeSequences(bc)
+mol_info_h5<-fp(bp,"data/cd14_monocytes_molecule_info.h5")
+mi0<-as.data.frame(rhdf5::h5dump(mol_info_h5))
+mi<-subset(mi0, barcode %in% cm$bc_enc)
+cm2<-cm[,c("bc_enc","Barcode","zero_frac")]
+colnames(cm2)<-c("barcode","barcode_str","zero_frac")
+mi<-mi[,c("barcode","gene","umi","reads")]
+mi<-merge(mi,cm2,by="barcode")
+#order barcodes in increasing order of zero fraction
+mi<-as.data.frame(mi)
+o<-order(cm2$zero_frac)
+ubo<-cm2$barcode_str[o] #barcodes in sort order
+
+ncells<-20
+#cells<-ubo[seq.int(1,length(ubo),length.out=ncells)]
+cells<-ubo[1:ncells]
+mi2<-subset(mi,barcode_str %in% cells & reads>0)
+mi2$barcode_str<-factor(mi2$barcode_str,levels=cells)
+
+#ggplot(mi2,aes(x=reads,group=barcode_str))+geom_density()+scale_x_log10()
+ggplot(mi2,aes(x=reads,y=barcode_str,fill=zero_frac))+geom_density_ridges()+scale_x_log10()+scale_fill_continuous(low="blue",high="red")
+```
+
+normalize read counts with scran and census counts
+
+```{r}
+sce2<-sce
+sz<-scran::computeSumFactors(rc)
+assay(sce2,"scran_counts")<-t(t(rc)/sz)
+assay(sce2,"cpm")<-t(t(rc)/Matrix::colSums(rc))*1e6
+# First create a CellDataSet from the relative expression levels
+cds<-scran::convertTo(sce2,"monocle",assay.type="cpm")
+assay(sce2,"census_counts")<-monocle::relative2abs(cds,method="num_genes")
+```
+
+mean vs pzero
+
+```{r}
+#mean vs probability of zero
+z<-Matrix::colMeans(m)
+n<-Matrix::colSums(m)
+pz<-Matrix::colMeans(m==0)
+G<-nrow(m)
+plot(log(z),pz,xlab="log(mean expr)",ylab="zero fraction")
+plot(n,log(pz))
+fit<-coef(lm(log(pz)~n))
+abline(fit)
+plot(log(n),pz)
+curve(exp(exp(x)*fit[2]+fit[1]),from=6,to=10,add=T)
+```
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+#i<-1
+i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+(th3<-nb_mle(x))
+lpmf(x)
+llcurve_poilog(max(x),th,col="blue",lwd=2)
+llcurve_lomax(max(x),th2,lik="poi",col="green",lty=2,lwd=2,q=5000)
+llcurve_nb(max(x),th3,col="red",lty=3,lwd=2)
+legend("topright",c("poisson-lognormal","poisson-lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=2)
+```
+
+make lpmf plots for all cells
+
+```{r}
+f<-function(t){
+  df<-lpmf(m[,t],doplot=FALSE)
+  df$id<-t
+  df
+}
+res<-do.call(rbind,lapply(seq.int(ncol(m)),f))
+ggplot(res,aes(x=x,y=y,group=id))+geom_line(alpha=.1)+xlab("log(1+x)")+ylab("log(density)")
+ggsave(fp(plt_dir,"lpmf_allcells_monocytes.pdf"),width=6,height=4)
+```
+
+poisson-lomax quantile normalization of read counts
+
+```{r}
+i<-sample.int(ncol(rc),size=1)
+umi<-m[,i]
+x<-rc[,i]
+#poisson-lomax qumi
+(th<-plomax_mle(umi,quadpts=1000))
+xqumi<-quminorm_plomax(x,shape=th[1],sc=th[2])
+#poisson-lognormal qumi
+(th2<-poilog_mle(umi))
+xqumi2<-quminorm_poilog(x,shape=th2[2],sc=th2[1])
+#negative binomial qumi
+(th3<-nb_mle(umi))
+xqumi3<-quminorm_nb(x,shape=th3[1],sc=th3[2])
+#plot qumi distributions and compare to actual UMI
+lpmf(xqumi,type="l",col="green",lty=2,lwd=2)
+lpmf(umi,add=TRUE,type="p",cex=2)
+lpmf(xqumi2,add=TRUE,type="l",col="blue",lty=1,lwd=2)
+lpmf(xqumi3,add=TRUE,type="l",col="red",lty=3,lwd=2)
+cc<-ceiling(assay(sce2,"census_counts")[,i])
+lpmf(cc,add=TRUE,type="l",col="orange",lty=2,lwd=2)
+legend("topright",c("negative binomial","poisson-lognormal","poisson-lomax","census counts"),lty=c(3,1,2,2),col=c("red","blue","green","orange"),lwd=2)
+title("Quasi-UMIs vs Actual UMIs")
+```
+
+```{r}
+#Poisson-lomax tends to overestimate
+plot(log1p(umi),log1p(xqumi),main="Poisson-Lomax Quasi-UMIs")
+abline(0,1)
+#neg binom tends to underestimate
+plot(log1p(umi),log1p(xqumi3),main="Negative Binomial Quasi-UMIs")
+abline(0,1)
+#Poisson-lognormal does well
+plot(log1p(umi),log1p(xqumi2),main="Poisson-Lognormal Quasi-UMIs")
+abline(0,1)
+#census counts
+plot(log1p(umi),log1p(cc),main="Census Counts")
+abline(0,1)
+```
+
+#see if quasi-UMI improves over other normalizations
+
+Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
+
+```{r}
+nz<-x>0
+dat<-data.frame(umi_true=umi[nz])
+dat$qumi_poilog<-xqumi2[nz]
+dat$qumi_nb<-xqumi3[nz]
+dat$qumi_plomax<-xqumi[nz]
+dat$read_counts<-x[nz]
+dat$cpm<-1e6*dat$read_counts/sum(dat$read_counts)
+dat$scran<-assay(sce2,"scran_counts")[nz,i]
+dat$census<-cc[nz]
+dfunc<-function(dat,metric="euclidean"){
+  as.matrix(dist(t(log(dat)),method=metric))[,1]
+}
+dfunc(dat)
+```
+
+apply QUMI to entire data matrix 
+```{bash}
+Rscript ./real/util/quminorm_script.R ./real/zheng_2017_monocytes/data/01_sce_all_genes_all_cells.rds ./real/zheng_2017_monocytes/data/02_sce_qumi.rds
+```
+or 
+```{bash}
+sbatch -J monocytes ./real/util/quminorm_script.slurm ./real/zheng_2017_monocytes/data/01_sce_all_genes_all_cells.rds ./real/zheng_2017_monocytes/data/02_sce_qumi.rds
+```
+
+For sensitivity analysis, additional poilog quminorm with sig=1.0 instead of 2.0
+
+```{r}
+sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+#5 minutes
+system.time(assay(sce2,"qumi_poilog1")<-quminorm_matrix(rc,1.0,lik="poilog"))
+saveRDS(sce2,file=fp(bp,"data/02_sce_qumi.rds"))
+```
+
+compare distances between normalizations for all cells
+
+```{r}
+#sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+res<-distance_compare(sce2)
+write.table(res,file=fp(bp,"results/qumi_distance.txt"),quote=FALSE,row.names=FALSE)
+```
+
+graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
+
+```{r}
+library(tidyverse)
+res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
+pd<-tidyr::gather(res,key="method",value="distance",-cell)
+pd<-subset(pd,method!="counts")
+pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
+o<-order(pd2$med_dist)
+pd$method<-factor(pd$method,levels=pd2$method[o])
+ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"dist_comp_monocytes.pdf"),width=6,height=4)
+```
+
+visualize the QUMI normalization transform
+
+```{r}
+#sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+qumi<-assay(sce2,"qumi_poilog")
+rc<-assay(sce2,"read_counts")
+cc<-assay(sce2,"census_counts")
+q<-qumi[,51]
+r<-rc[,51]
+cs<-cc[,51]
+plot(r,q)
+abline(0,.01)
+plot(r,round(cs))
+```
+
+## Approaches that didn't work well
+
+Try Bayesian fit, it doesn't work very well.
+
+```{r}
+library(rstan)
+rstan_options(auto_write=TRUE)
+options(mc.cores=4)
+```
+
+```{r}
+lik<-"poisson"
+#lik<-"negbinom"
+tx<-table(x)
+xu<-as.integer(names(tx))
+stmod<-stan_model(file=paste0("./algs/unused/lomax_",lik,".stan"))
+spars<-c("pwtail","scl","phi")
+if(lik=="poisson"){ spars<-spars[1:2] }
+standat<-list(x=xu,w=as.integer(tx),n=length(xu))
+#spar_init<-replicate(4,list(pwtail=th[1],scl=th[2]),simplify=FALSE)
+system.time(stfit<-sampling(stmod,data=standat,pars=spars,iter=10000))#,init=spar_init))
+summary(stfit)$summary[,c("mean","2.5%","97.5%")]
+pairs(stfit,pars=spars)
+plot(stfit,pars=spars)
+
+th2<-get_posterior_mean(stfit,c("pwtail","scl"))[,5]
+lpmf(x)
+llcurve(max(x),th2,lik="poi")
+```
+
+try poisson-tweedie with package mcglm
+http://www.leg.ufpr.br/doku.php/publications:papercompanions:ptw
+
+```{r}
+library(mcglm) #devtools::install_github("wbonat/mcglm")
+
+dat<-data.frame(x=x)
+fit<-mcglm(c(x~1),mc_id(dat),link="identity",variance="poisson_tweedie",power_fixed=FALSE,data=dat,control_algorithm=list(verbose=TRUE,max_iter=100,tunning=0.15,correct=TRUE))
+```
+

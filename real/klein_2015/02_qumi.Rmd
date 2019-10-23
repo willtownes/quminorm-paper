@@ -1,0 +1,110 @@
+---
+title: "Quasi-UMIs for Klein 2015 (indrops)"
+author: "Will Townes"
+output: html_document
+---
+
+Estimate poisson-lomax, poisson-lognormal, and negative binomial (poisson-gamma) parameters for each cell
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(ggplot2); theme_set(theme_bw())
+source("./algs/quminorm.R") #also loads nblomax.R
+source("./algs/poilog.R")
+fp<-file.path
+bp<-"./real/klein_2015"
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)) dir.create(plt_dir,recursive=TRUE)
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+m<-counts(sce)
+cm<-colData(sce)
+```
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+i<-1146
+colnames(m)[i] #cell ID="cell1146"
+#set.seed(222)
+#i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+res<-lpmf(x,doplot=FALSE)
+xmax<-expm1(6.5)
+
+fpoilog<-function(t){
+  sads::dpoilog(floor(exp(t)),mu=th[1],sig=th[2],log=TRUE)
+}
+fplomax<-function(t){
+  dplomax(floor(exp(t)),tail=th2[1],scale=th2[2],log=TRUE,quadpts=5000)
+}
+
+pdf(file=fp(plt_dir,"lpmf_llcurve_klein.pdf"),width=5,height=5)
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(-18,0),xlim=c(-log(2),log(xmax)),cex=1.2)
+curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=2)
+curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=2,lty=2)
+points(rep(-log(2),2),c(fpoilog(-Inf),fplomax(-Inf)),col=c("blue","green"),pch=c(1,19),cex=c(.8,.3))
+legend("topright",c("Poisson-lognormal","Poisson-Lomax"),col=c("blue","green"),lty=c(1,2),lwd=2)
+dev.off()
+```
+
+Compute MLEs for all cells `time Rscript ./real/util/mles_qumi.R ./real/klein_2015` or `sbatch -J klein ./real/util/mles_qumi.slurm ./real/klein_2015`
+
+```{r}
+nb<-read.table(fp(bp,"data/mle_nb.txt"),header=TRUE)
+lx<-read.table(fp(bp,"data/mle_poilomax.txt"),header=TRUE)
+ln<-read.table(fp(bp,"data/mle_poilog.txt"),header=TRUE)
+good<-!is.na(lx$tail) & !is.na(ln$mu) & !is.na(nb$size)
+table(good) #all good
+#when is poilog best?
+mean(ln$bic<pmin(lx$bic,nb$bic))
+#when is poisson-lomax best?
+mean(lx$bic<pmin(ln$bic,nb$bic))
+#nb best?
+mean(nb$bic<pmin(ln$bic,lx$bic))
+```
+
+Based on BIC, in 60% of cells, Poisson-lognormal fits best. In 40% of cells Poisson-lomax fits best. In 0% of cells, negative binomial fits best.
+
+Comparing MLEs of scale parameter to MOM of scale param with fixed shape
+
+```{r}
+lpz<-log(1-colMeans(m>0))
+scale_mom<-poilog_pzero2mu(lpz,sig=2.0)
+pd<-data.frame(scale_mom=scale_mom,celltype=cm$cell_type1,shape_mle=ln$sig,scale_mle=ln$mu)
+ggplot(pd,aes(x=scale_mle,y=scale_mom,colour=shape_mle))+geom_point()+geom_abline(intercept=0,slope=1)+scale_color_gradient2(low="orange",mid="blue",high="red",midpoint = 2.0)+xlab("scale parameter MLE")+ylab("scale parameter MOM estimate")
+ggsave(fp(plt_dir,"klein_mom_vs_mle.pdf"),width=6,height=4)
+```
+
+Comparing fitted MLEs to summary statistics
+
+```{r}
+cm<-colData(sce)
+z<-log10(colSums(m))
+hist(ln$sig,breaks=100)
+boxplot(ln$sig~cm$cell_type1)
+boxplot(z~cm$cell_type1)
+plot(z,ln$sig,col=cm$cell_type1)
+plot(z,ln$mu)
+plot(z,ln$mu/ln$sig)
+
+hist(lx$tail,breaks=100)
+plot(z,lx$tail)
+plot(z,log(lx$scale))
+
+hist(nb$size,breaks=100)
+```
+
+For neg binom, the size parameter distribution is bimodal with peaks at 0.1 (d2,d4 cell types) and 0.6 (d0,d7 cell types). For poisson-lognormal the sig parameter distribution is bimodal with peaks at 1.1 (d0,d7) and 2.0 (d2,d4). For poisson-lomax the tail parameter distribution is bimodal with peaks at 1.1 (d2,d4) and 3.0 (d0,d7). The bimodality in all cases is determined by the cell type.
+
+```{r}
+boxplot(nb$size~cm$cell_type1)
+boxplot(ln$sig~cm$cell_type1)
+boxplot(lx$tail~cm$cell_type1)
+```

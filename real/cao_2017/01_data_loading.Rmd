@@ -1,0 +1,38 @@
+---
+title: "Cao et al 2017 Worm Cell Atlas"
+author: "Will Townes"
+date: "4/6/2019"
+output: html_document
+---
+
+```{r}
+library(SingleCellExperiment)
+fp<-file.path
+bp<-"./real/cao_2017"
+```
+
+# Overview 
+This is the code to produce a *SingleCellExperiment* object of the worm cell atlas scRNA-Seq experiment by Cao et al. (2017). Single cell RNA-Seq for worm larva. Documentation: http://atlas.gs.washington.edu/worm-rna/docs/
+
+```{bash}
+wget -P data http://waterston.gs.washington.edu/sci_RNA_seq_gene_count_data/Cao_et_al_2017_vignette.RData
+```
+
+```{r}
+cds<-attach(fp(bp,"data/Cao_et_al_2017_vignette.RData"))$cds
+umi<-exprs(cds)
+gm<-fData(cds)
+cm<-pData(cds)
+gc<-!is.na(cm$tissue) & !is.na(cm$cell.type) & cm$tissue != "Failed QC"
+cm<-cm[gc,]
+cm$tissue<-factor(cm$tissue)
+cm$cell.type<-factor(cm$cell.type)
+umi<-umi[,gc]
+gg<-gm$num_cells_expressed>0 & Matrix::rowSums(umi)>0
+gm<-gm[gg,]
+umi<-umi[gg,]
+rownames(gm)<-rownames(umi)<-toupper(gm$symbol)
+
+sce<-SingleCellExperiment(assays=list(counts=umi),rowData=gm,colData=cm)
+saveRDS(sce,file=fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```

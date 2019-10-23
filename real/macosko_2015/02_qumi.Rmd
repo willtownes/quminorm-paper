@@ -1,0 +1,201 @@
+---
+title: "Quasi-UMIs for Macosko 2015"
+author: "Will Townes"
+date: "4/10/2019"
+output: html_document
+---
+
+Exploring reads vs UMIs with goal of normalizing read counts to quasi-UMIs
+
+* Estimate discrete power law distribution for many UMI samples
+* Quantile normalize read counts to quasi UMI counts
+* Compare qumi distribution to actual UMI distribution
+
+```{r}
+library(tidyverse); theme_set(theme_bw())
+suppressPackageStartupMessages(library(SingleCellExperiment))
+source("./algs/quminorm.R") #also loads nblomax.R,poilog.R
+source("./util/misc.R") #splitMat function
+fp<-file.path
+bp<-"./real/macosko_2015"
+
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+data loading
+
+```{r}
+filter_genes_pct<-function(sce,thresh=.01,assay_name="counts"){
+  #removes all genes that are not expressed in at least .01*n cells
+  #.01= (1 percent) and n=ncol(m)=number of total cells in the data matrix
+  #returns a SingleCellExperiment whose rows are the subset of rows of m satisfying the criterion.
+  #columns of the matrix with all zeros are also removed.
+  m<-assay(sce,assay_name)
+  gg<-rowSums(m>0) > (thresh*ncol(m))
+  sce<-sce[gg,]
+  gc<-colSums(m)>0
+  sce[,gc]
+}
+
+sce<-readRDS(fp(bp,"data/02_sce_subset_r6.rds"))
+m<-counts(sce)
+rc<-assay(sce,"read_counts")
+```
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+#i<-1
+i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+(th3<-nb_mle(x))
+lpmf(x,cex=2)
+llcurve_poilog(max(x),th,col="blue",lwd=2)
+llcurve_lomax(max(x),th2,lik="poi",col="green",lty=2,lwd=2,q=5000)
+llcurve_nb(max(x),th3,col="red",lty=3,lwd=2)
+legend("topright",c("poisson-lognormal","poisson-lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=2)
+```
+
+make lpmf plots for all cells
+
+```{r}
+f<-function(t){
+  df<-lpmf(m[,t],doplot=FALSE)
+  df$id<-t
+  df
+}
+res<-do.call(rbind,lapply(seq.int(ncol(m)),f))
+ggplot(res,aes(x=x,y=y,group=id))+geom_line(alpha=.1)+xlab("log(1+x)")+ylab("log(density)")
+ggsave(fp(plt_dir,"lpmf_allcells_macosko.pdf"),width=6,height=4)
+```
+
+apply QUMI to entire data matrix 
+
+```{bash}
+Rscript ./real/util/quminorm_script.R ./real/macosko_2015/data/02_sce_subset_r6.rds ./real/macosko_2015/data/03_sce_qumi_r6.rds
+```
+or 
+```{bash}
+sbatch -J macosko ./real/util/quminorm_script.slurm ./real/macosko_2015/data/02_sce_subset_r6.rds ./real/macosko_2015/data/03_sce_qumi_r6.rds
+```
+
+For sensitivity analysis, additional poilog quminorm with sig=1.0 instead of 2.0
+
+```{r}
+sce2<-readRDS(fp(bp,"data/03_sce_qumi_r6.rds"))
+#20 minutes
+system.time(assay(sce2,"qumi_poilog1")<-quminorm_matrix(rc,1.0,lik="poilog"))
+saveRDS(sce2,file=fp(bp,"data/03_sce_qumi_r6.rds"))
+```
+
+compare distances between normalizations for all cells. Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
+
+```{r}
+sce2<-readRDS(fp(bp,"data/03_sce_qumi_r6.rds"))
+res<-distance_compare(sce2)
+#sce3<-sce2
+#assays(sce3)<-assays(sce2)[c("counts","qumi_poilog1")]
+#res2<-distance_compare(sce3)
+#res$qumi_poilog1<-res2$qumi_poilog1
+write.table(res,file=fp(bp,"results/qumi_distance.txt"),quote=FALSE,row.names=FALSE)
+```
+
+What if we prefilter genes based on a percentage threshold instead of a fixed threshold? Does splitting the data into 10 smaller batches affect the quminorm results? 
+```{r}
+qumifunc<-function(sce){
+  quminorm_matrix(assay(sce,"read_counts"),2.0,lik="poilog")
+}
+
+sce_pct1<-filter_genes_pct(sce,thresh=.01)
+system.time(assay(sce_pct1,"qumi_poilog")<-qumifunc(sce_pct1)) #17 mins
+
+x<-splitMat(sce,10)
+res<-list()
+res_pct1<-list()
+for(i in seq_along(x)){
+  sce_i<-sce[,x[[i]]]
+  assay(sce_i,"qumi_poilog")<-qumifunc(sce_i)
+  res[[i]]<-sce_i
+  sce_pct1_i<-filter_genes_pct(sce_i,thresh=.01)
+  assay(sce_pct1_i,"qumi_poilog")<-qumifunc(sce_pct1_i)
+  res_pct1[[i]]<-sce_pct1_i
+}
+#saveRDS(sce_pct1,file=fp(bp,"data/04_sce_qumi_r6_pct1.rds"))
+#saveRDS(res,file=fp(bp,"data/04_split_sce_qumi_r6.rds"))
+#saveRDS(res_pct1,file=fp(bp,"data/04_split_sce_qumi_r6_pct1.rds"))
+d1<-distance_compare(sce_pct1)
+d2<-do.call(rbind,lapply(res,distance_compare))
+d3<-do.call(rbind,lapply(res_pct1,distance_compare))
+d0<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE)
+d0<-d0[,colnames(d1)]
+d0$thresh<-"fixed"; d0$is_split<-FALSE
+d1$thresh<-"percent"; d1$is_split<-FALSE
+d2$thresh<-"fixed"; d2$is_split<-TRUE
+d3$thresh<-"percent"; d3$is_split<-TRUE
+res<-rbind(d0,d1,d2,d3)
+res$counts<-NULL
+write.table(res,file=fp(bp,"results/qumi_distance_qc_compare.txt"),quote=FALSE,row.names=FALSE)
+```
+```{r}
+res<-read.table(fp(bp,"results/qumi_distance_qc_compare.txt"),header=TRUE,stringsAsFactors=FALSE)
+ggplot(res,aes(x=thresh,y=qumi_poilog,fill=is_split))+geom_boxplot()+scale_y_log10()+ylab("distance from UMI")+xlab("gene filtering method")
+res2<-res %>% group_by(cell,thresh) %>% summarize(chg=qumi_poilog[!is_split]-qumi_poilog[is_split])
+ggplot(res2,aes(x=thresh,y=chg,fill=thresh))+geom_boxplot()+xlab("gene filtering method")+ylab("change in dist from UMI merged vs split")
+```
+
+```{r}
+#i<-sample.int(ncol(rc),size=1)
+umi<-m[,i]
+x<-rc[,i]
+#poisson-lomax qumi
+(th<-plomax_mle(umi,quadpts=1000))
+xqumi<-quminorm_plomax(x,shape=th[1],sc=th[2])
+#poisson-lognormal qumi
+(th2<-poilog_mle(umi))
+xqumi2<-quminorm_poilog(x,shape=th2[2],sc=th2[1])
+#negative binomial qumi
+(th3<-nb_mle(umi))
+xqumi3<-quminorm_nb(x,shape=th3[1],sc=th3[2])
+#plot qumi distributions and compare to actual UMI
+lpmf(xqumi,type="l",col="green",lty=2,lwd=2)
+lpmf(umi,add=TRUE,type="p",cex=2)
+lpmf(xqumi2,add=TRUE,type="l",col="blue",lty=1,lwd=2)
+lpmf(xqumi3,add=TRUE,type="l",col="red",lty=3,lwd=2)
+cc<-ceiling(assay(sce2,"census_counts")[,i])
+lpmf(cc,add=TRUE,type="l",col="orange",lty=2,lwd=2)
+legend("topright",c("negative binomial","poisson-lognormal","poisson-lomax","census counts"),lty=c(3,1,2,2),col=c("red","blue","green","orange"),lwd=2)
+title("Quasi-UMIs vs Actual UMIs")
+```
+
+```{r}
+#Poisson-lomax tends to overestimate
+plot(log1p(umi),log1p(xqumi),main="Poisson-Lomax Quasi-UMIs")
+abline(0,1)
+#neg binom tends to underestimate
+plot(log1p(umi),log1p(xqumi3),main="Negative Binomial Quasi-UMIs")
+abline(0,1)
+#Poisson-lognormal does well
+plot(log1p(umi),log1p(xqumi2),main="Poisson-Lognormal Quasi-UMIs")
+abline(0,1)
+#census counts
+plot(log1p(umi),log1p(cc),main="Census Counts")
+abline(0,1)
+```
+
+#see if quasi-UMI improves over other normalizations
+
+graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
+
+```{r}
+res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
+pd<-tidyr::gather(res,key="method",value="distance",-cell)
+pd<-subset(pd,method!="counts")
+pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
+o<-order(pd2$med_dist)
+pd$method<-factor(pd$method,levels=pd2$method[o])
+ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"dist_comp_macosko.pdf"),width=6,height=4)
+```

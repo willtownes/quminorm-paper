@@ -1,0 +1,43 @@
+#!/bin/bash
+#BSUB -J sra_download
+#BSUB -o output/test-%J.out
+#BSUB -e output/test-%J.err
+
+# Choose a queue that you have access (eg the normal queue) and submit
+# job as follows:
+# ---
+# cd ~/lsf
+# bsub -q normal < test.lsf
+# ---
+# Then look in the ~/lsf/output folder for the script log
+# that matches the job ID number
+
+echo '---PROCESS RESOURCE LIMITS---'
+ulimit -a
+echo '---SHARED LIBRARY PATH---'
+echo $LD_LIBRARY_PATH
+echo '---APPLICATION SEARCH PATH:---'
+echo $PATH
+echo '---LSF Parameters:---'
+printenv | grep '^LSF'
+echo '---LSB Parameters:---'
+printenv | grep '^LSB'
+echo '---LOADED MODULES:---'
+module list
+echo '---SHELL:---'
+echo $SHELL
+echo '---HOSTNAME:---'
+hostname
+echo '---GROUP MEMBERSHIP (files are created in the first group listed):---'
+groups
+echo '---DEFAULT FILE PERMISSIONS (UMASK):---'
+umask
+echo '---CURRENT WORKING DIRECTORY:---'
+pwd
+echo '---DISK SPACE QUOTA---'
+df .
+echo '---TEMPORARY SCRATCH FOLDER ($TMPDIR):---'
+echo $TMPDIR
+
+wget -i extdata/sraFilesPath.txt -P data/original/sra
+#cat extdata/sraFilesPath.txt | xargs -n 1 -P 8 wget -q -P data/original/sra

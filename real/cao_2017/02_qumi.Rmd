@@ -1,0 +1,194 @@
+---
+title: "Quasi-UMIs for Cao 2017"
+author: "Will Townes"
+output: html_document
+---
+
+Estimate poisson-lomax, poisson-lognormal, and negative binomial (poisson-gamma) parameters for each cell
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(ggplot2); theme_set(theme_bw())
+source("./algs/quminorm.R") #also loads nblomax.R, poilog.R
+fp<-file.path
+bp<-"./real/cao_2017"
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){dir.create(plt_dir,recursive=TRUE)}
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+m<-counts(sce)
+```
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+i<-6272 #cell ID="cele-002-090.AATCATACGG"
+#i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+max(x) #26
+
+xt<-table(x)
+xt2<-xt/sum(xt)
+xpts<-as.integer(names(xt2))
+txtlabs<-format(xt,big.mark=",",trim=TRUE)
+
+#compare histogram to lpmf
+pdf(file=fp(plt_dir,"cao_a_hist.pdf"),width=4,height=4)
+plot(xt2,lwd=5,ylim=c(0,1.1),xlim=c(-1,max(x)),xlab="UMI count",ylab="fraction of genes")
+txty<-xt2+0.05
+txty[2:5]<-txty[2:5]*c(5,4,3,2)
+text(xpts,y=txty,labels=txtlabs,adj=0.3,cex=0.75)
+dev.off()
+
+pdf(file=fp(plt_dir,"cao_b_hist_logy.pdf"),width=4,height=4)
+ypts<-log10(as.numeric(xt2))
+plot(xpts,ypts,type="b",ylim=c(min(ypts),0.5),xlim=c(-1,max(x)),xlab="UMI count",ylab="log10(fraction of genes)")
+text(xpts,ypts+0.3,labels=txtlabs,adj=0,cex=0.75)
+dev.off()
+
+pdf(file=fp(plt_dir,"cao_c_lpmf.pdf"),width=4,height=4)
+res<-lpmf(x,doplot=FALSE,logbase=10)
+plot(res$x,res$y,xlab="log10(1+UMI count)",ylab="log10(density)",type="b")
+dev.off()
+
+#larger lpmf on log10 scale not log10(1+...)
+res<-lpmf(x,doplot=FALSE)
+pdf(file=fp(plt_dir,"cao_lpmf.pdf"),width=4,height=4)
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)")
+dev.off()
+```
+
+make lpmf plots for all cells
+
+```{r}
+f<-function(t){
+  df<-lpmf(m[,t],doplot=FALSE)
+  df$id<-t
+  df
+}
+col_ids<-sample(ncol(m),size=500)
+res<-do.call(rbind,lapply(col_ids,f)) #slow
+res$x<-expm1(res$x)
+res$lx<-log(res$x)
+res$lx[is.infinite(res$lx)]<- -log(2)
+res_z<-subset(res,x==0)
+res_nz<-subset(res,x>0)
+
+ggplot(res)+geom_line(data=subset(res,x>0),aes(x=x,y=y,group=id),alpha=.2)+xlab("UMI count")+ylab("log(density)")+geom_point(data=subset(res,x==0),aes(x=1/2,y=y))+scale_x_log10(limits=c(1/2,NA),breaks=c(1/2,1,10,100),labels=c(0,1,10,100))+ylim(NA,max(res$y))+geom_vline(xintercept=sqrt(.5),color="#CCCCCC",size=10)
+ggsave(fp(plt_dir,"lpmf_500cells_cao.pdf"),width=6,height=4)
+```
+
+lpmf vs MLEs
+
+```{r}
+i<-6272 #cell ID="cele-002-090.AATCATACGG"
+#set.seed(222)
+#i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+#(th3<-nb_mle(x))
+res<-lpmf(x,doplot=FALSE)
+xmax<-expm1(4)
+
+fpoilog<-function(t){
+  sads::dpoilog(floor(exp(t)),mu=th[1],sig=th[2],log=TRUE)
+}
+fplomax<-function(t){
+  dplomax(floor(exp(t)),tail=th2[1],scale=th2[2],log=TRUE,quadpts=5000)
+}
+
+pdf(file=fp(plt_dir,"lpmf_llcurve_cao.pdf"),width=5,height=5)
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(-15,0),xlim=c(-log(2),log(xmax)),cex=1.2)
+curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=2)
+curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=2,lty=2)
+points(rep(-log(2),2),c(fpoilog(-Inf),fplomax(-Inf)),col=c("blue","green"),pch=c(1,19),cex=c(.8,.3))
+legend("topright",c("Poisson-lognormal","Poisson-Lomax"),col=c("blue","green"),lty=c(1,2),lwd=2)
+dev.off()
+```
+
+Compute MLEs for all cells `time Rscript ./real/util/mles_qumi.R ./real/cao_2017` or `sbatch -J cao ./real/util/mles_qumi.slurm ./real/cao_2017`
+
+```{r}
+nb<-read.table(fp(bp,"data/mle_nb.txt"),header=TRUE)
+lx<-read.table(fp(bp,"data/mle_poilomax.txt"),header=TRUE)
+ln<-read.table(fp(bp,"data/mle_poilog.txt"),header=TRUE)
+good<-!is.na(lx$tail) & !is.na(ln$mu) & !is.na(nb$size)
+mean(good)
+nb2<-nb[good,]
+lx2<-lx[good,]
+ln2<-ln[good,]
+#when is poilog best?
+mean(ln2$bic<pmin(lx2$bic,nb2$bic))
+#when is poisson-lomax best?
+mean(lx2$bic<pmin(ln2$bic,nb2$bic))
+#nb best?
+mean(nb2$bic<pmin(ln2$bic,lx2$bic))
+```
+
+Based on BIC, in 90% of cells, negative binomial fits best. In 5% of cells Poisson-lomax fits best. In 5% of cells, Poisson-lognormal fits best.
+
+Comparing fitted MLEs to summary statistics
+
+```{r}
+cm<-colData(sce)
+z<-log10(Matrix::colSums(m))
+hist(ln$sig,breaks=100)
+boxplot(ln$sig~cm$tissue)
+boxplot(ln$sig~cm$cell.type)
+plot(z,ln$sig)
+plot(z,ln$mu)
+plot(z,ln$mu/ln$sig)
+
+plot(z,lx$tail,ylim=c(0,2))
+plot(z,log(lx$scale))
+```
+
+For neg binom, the size parameter ranges from .003 to .1 with .015 being typical. For poisson-lognormal the sig parameter ranges from 2-3 with 2.5 typical. For poisson-lomax the tail parameter is around 0.7-0.8.
+
+infer params from prob zero
+
+```{r}
+lpz<-log(1-Matrix::colMeans(m>0))
+nb_mu2<-nb_pzero2mu(lpz,nb$size)
+plot(nb$mu,nb_mu2) #excellent agreement
+
+ln_mu2<-poilog_pzero2mu(lpz,ln$sig)
+plot(ln$mu,ln_mu2) #excellent agreement
+```
+
+```{r}
+#vuong test
+i<-1
+plg_lp<-function(x,th){sads::dpoilog(x,mu=th[1],sig=th[2],log=TRUE)}
+nb_lp<-function(x,th){dnbinom(x,size=th[1],mu=th[2],log=TRUE)}
+plx_lp<-function(x,th){dplomax(x,tail=th[1],scale=th[2],log=TRUE,quadpts=5000)}
+lpfuncs<-list(nb=nb_lp,plg=plg_lp,plx=plx_lp)
+
+y<-m[,i]
+th1<-as.numeric(ln[i,c("mu","sig")])
+th2<-as.numeric(nb[i,c("size","mu")])
+lpfunc1<-plg_lp; lpfunc2<-nb_lp
+
+xt<-table(y)
+x<-as.integer(names(xt))
+n<-as.integer(xt)
+
+vuong_discrete<-function(x,n,lpfunc1,lpfunc2,th1,th2){
+  #test whether model for lpfunc1 is better than lpfunc2 for data y
+  #x=unique values of data
+  #n=number of times each value was observed
+  #can get x,n from table(y)
+  #lpfunc1,lpfunc2=some functions of x giving log-likelihoods
+  #th1,th2=parameters of lpfunc1,lpfunc2
+  delta<-lpfunc1(x,th1)-lpfunc2(x,th2)
+  s<-sqrt(Hmisc::wtd.var(delta,n)/sum(n))
+  z<-Hmisc::wtd.mean(delta,n)/s
+  pval<-2*pnorm(abs(z),lower.tail=FALSE)
+  c(zstat=z,pval=pval)
+}
+```

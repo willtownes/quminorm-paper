@@ -1,0 +1,214 @@
+---
+title: "Patel Glioblastoma- Data Loading"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(monocle) #also loads Matrix
+library(SingleCellExperiment) #also loads SummarizedExperiment
+sparse2disk<-function(Y,filename){
+  #given a sparse Matrix Y, write it to disk as COO format
+  if(!is(Y,"sparseMatrix")) Y<-Matrix(Y,sparse=TRUE)
+  write.table(Matrix::summary(Y), file=filename, row.names=FALSE, quot=FALSE)
+}
+fp<-file.path
+bp<-"./real/patel_2014"
+```
+
+The preprocessing is documented in the data package [patel2014gliohuman](https://github.com/willtownes/patel2014gliohuman)
+
+Load Count Data and TPM. TPM can be further normalized by Census method from package monocle.
+
+```{r}
+#devtools::install_github("willtownes/patel2014gliohuman")
+library(patel2014gliohuman)
+data(patel_counts) #creates summarizedExperiment object "patel_counts"
+data(patel_tpm) #creates summarizedExperiment object "patel_tpm"
+stopifnot(all(rownames(patel_counts)==rownames(patel_tpm)))
+#same coldata for both
+all(all(colData(patel_counts)==colData(patel_tpm),na.rm=TRUE))
+#convert to SingleCellExperiment object (both counts and tpm)
+patel<-as(patel_counts, "SingleCellExperiment")
+assay(patel,"tpm")<-assay(patel_tpm)
+rm(patel_counts,patel_tpm)
+```
+
+### Convert from ENSEMBL to HUGO gene IDs
+
+```{r}
+bm<-bmart::useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="jul2015.archive.ensembl.org")
+gmeta<-bmart::getBM(attributes=c("ensembl_gene_id","hgnc_symbol"),filters="ensembl_gene_id",values=rownames(patel),mart=bm)
+gmeta<-gmeta[!duplicated(gmeta$ensembl_gene_id),]
+gmeta<-gmeta[gmeta$hgnc_symbol != "",] #remove pseudogenes
+#find hugo IDs with multiple matching ensembl IDs
+dups<-plyr::ddply(gmeta,"hgnc_symbol",plyr::summarise,ndup=length(ensembl_gene_id))
+dups$is_dup<-dups$ndup>1
+gmeta<-plyr::join(gmeta,dups,by="hgnc_symbol")
+```
+
+```{r}
+#ensure same sort order between gmeta and patel
+patel<-patel[gmeta$ensembl_gene_id,]
+ensembl2hugo<-function(m,gmeta){
+  #m is an expression matrix either counts or tpm
+  #converts from ensembl genes to hugo
+  #sums up counts or tpms for multiple ensembl genes mapping to same hugo
+  #direct conversion for non-duplicate genes
+  m1<-m[with(gmeta,ensembl_gene_id[!is_dup]),]
+  rownames(m1)<-with(gmeta,hgnc_symbol[!is_dup])
+  #merging duplicates
+  m2<-m[with(gmeta,ensembl_gene_id[is_dup]),]
+  #combine ensembl gene counts that occurred for same HUGO gene
+  m3<-lapply(1:ncol(m2),function(x){tapply(m2[,x],gmeta$hgnc_symbol[gmeta$is_dup],sum)})
+  m3<-Matrix::Matrix(do.call("cbind",m3))
+  rbind(m1,m3)
+}
+new_assays<-sapply(assays(patel),ensembl2hugo,gmeta,simplify=FALSE)
+patel<-SingleCellExperiment(assays=new_assays,colData=colData(patel))
+rm(new_assays)
+```
+
+get GC content and gene length 
+
+```{r}
+#this code modified from https://www.bioconductor.org/packages/release/bioc/vignettes/zinbwave/inst/doc/intro.html#gene-level-covariates
+gcl<-bmart::getBM(attributes=c('hgnc_symbol','start_position','end_position','percentage_gc_content'), filters='hgnc_symbol', values=gmeta$hgnc_symbol, mart=bm)
+gcl<-gcl[!is.na(gcl$percentage_gc_content),]
+gcl$length <- gcl$end_position - gcl$start_position
+gcl<-plyr::ddply(gcl,"hgnc_symbol",plyr::summarise,length=mean(length),gcc=mean(percentage_gc_content))
+rownames(gcl)<-gcl$hgnc_symbol
+rowData(patel)<-gcl[rownames(patel),]
+
+dir.create(fp(bp,"data"))
+saveRDS(patel,file=fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+### Find Subset of Data
+We mostly care about the glioblastoma cells that were included in the analysis. Also, the authors excluded many samples due to quality control issues. Generate a filtered dataset based on these criteria.
+
+```{r}
+patel<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+cm<-as.data.frame(colData(patel))
+table(cm$sampleType)
+keep<-with(cm,cellType=="Glioblastoma" & includeSample)
+with(cm[keep,],table(sampleType,tumorName))
+patel<-patel[,keep]
+saveRDS(patel,file=fp(bp,"data/02_sce_all_genes_filtered_cells.rds"))
+```
+
+Find tumors with multiple plates for single cell
+
+```{r}
+cm<-as.data.frame(colData(patel))
+sc<-cm$sampleType=="SC"
+plyr::ddply(cm[sc,],"tumorName",plyr::summarise,nrun=length(unique(runID)))
+plyr::ddply(cm[sc,],"tumorName",plyr::summarise,ninst=length(unique(instrument)))
+#MGH26 is the only tumor with two instrument IDs
+cells<-sc & cm$tumorName=="MGH26"
+table(cm[cells,c("runID","instrument")])
+cells<-cells & cm$runID %in% c("556","704")
+head(cm[cells,])
+cnames<-cm[cells,"Run"]
+length(unique(cnames)) #118 cells
+#also include any bulk samples in this category
+blk<-with(cm,sampleType=="bulk" & tumorName=="MGH26")
+mgh26<-patel[,cells | blk]
+dir.create(fp(bp,"data/MGH26"))
+saveRDS(mgh26,file=fp(bp,"data/MGH26/02_sce_all_genes_filtered_cells.rds"))
+```
+
+Summary: restrict analysis to Glioblastoma cells (not cell line) from tumor MGH26. Include only runID 556 (instrument GLPB22-B5C) and 704 (instrument HISEQ) since runID 825 was a singleton. Include only the cells used by the authors of the original paper.
+
+### Genes Used by Original Authors
+
+**Direct Download of Series Matrix** Rather than processing reads, we can just use the expression matrix provided by the authors. However, they don't provide raw counts but rather an already normalized version of the data that doesn't preserve the "zeroes". However, it's still useful because they reduced to a subset of the genes. We can focus on those same genes to maintain comparability.
+
+```{bash}
+wget ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE57nnn/GSE57872/suppl/GSE57872%5FGBM%5Fdata%5Fmatrix.txt.gz -P data/original
+gunzip data/original/GSE57872_GBM*.txt.gz
+```
+
+```{r}
+m<-read.table(fp(bp,"data/original/GSE57872_GBM_data_matrix.txt"))
+genes<-rownames(m)
+genes<-genes[genes %in% rownames(patel)]
+dir.create("extdata")
+write.table(genes,fp(bp,"extdata/genes_patel_used.txt"),row.names=FALSE,quot=FALSE,col.names=FALSE)
+```
+
+### Normalization with SCRAN and Monocle
+
+Normalize **all tumors** data. Filter for Patel's genes and cells in tumors, get sizefactors.
+Exclude bulk RNA-Seq samples, non-tumor samples (eg cell lines), and samples not included by the authors in their analysis
+
+```{r}
+normalize_scran_monocle<-function(sce,plot=FALSE){
+  sce<-scran::computeSumFactors(sce,assay.type="counts")
+  if(plot){
+    library_size<-Matrix::colSums(assay(sce,"counts"))
+    plot(log(library_size),log(sizeFactors(sce)))
+    hist(sizeFactors(sce),breaks=20)
+  }
+  sce<-scater::normalize(sce,"counts",return_log=FALSE,log_exprs_offset=0)
+  #scran normalized expression in "normcounts" slot
+  #use monocle to convert TPM to "census counts"
+  cds<-newCellDataSet(as.matrix(assay(sce,"tpm")), lowerDetectionLimit=0.1, expressionFamily=tobit(Lower=0.1))
+  assay(sce,"monocle_census_counts")<-Matrix(relative2abs(cds,method="tpm_fraction"),sparse=TRUE)
+  sce
+}
+
+#SingleCellExperiment
+patel<-readRDS(fp(bp,"data/02_sce_all_genes_filtered_cells.rds"))
+dir.create(fp(bp,"data/all_tumors"))
+gmeta<-scan(file=fp(bp,"extdata/genes_patel_used.txt"),what="character")
+meta<-as.data.frame(colData(patel))
+incl<-with(meta,includeSample=="TRUE" & cellType=="Glioblastoma" & sampleType=="SC")
+patel_sc<-patel[rownames(patel) %in% gmeta, incl]
+patel_sc<-normalize_scran_monocle(patel_sc,plot=TRUE)
+#m<-assay(patel_sc,"counts") #a sparse Matrix
+#m[m<1]<-0
+#assay(patel_sc,"counts")<-m
+m<-Matrix(assay(patel_sc,"normcounts"),sparse=TRUE)
+#m[m<1]<-0
+assay(patel_sc,"normcounts")<-m
+meta<-colData(patel_sc)
+cn<-colnames(meta)
+cn[cn=="tumorName"]<-"Tumor"
+cn[cn=="instrument"]<-"Instrument"
+colnames(meta)<-cn
+colData(patel_sc)<-meta
+#store R object for future use
+saveRDS(patel_sc,file=fp(bp,"data/all_tumors/03_sce_filtered_genes_filtered_cells_normalized.rds"))
+#store scran, tpm, and census counts to disk for python-based programs
+sparse2disk(assay(patel_sc,"normcounts"),fp(bp,"data/all_tumors/Yscran.tsv"))
+sparse2disk(assay(patel_sc,"tpm"),fp(bp,"data/all_tumors/Ytpm.tsv"))
+sparse2disk(assay(patel_sc,"monocle_census_counts"),fp(bp,"data/all_tumors/Ymonocle.tsv"))
+#write.table(as.data.frame(colData(patel_sc)),file=fp(bp,"data/all_tumors/phenodata.tsv",row.names=FALSE,quot=FALSE)
+```
+
+Normalize **MGH26** data, save subset of genes used by original authors to be passed to dimension reduction algorithms
+
+```{r}
+mgh26<-readRDS(fp(bp,"data/MGH26/02_sce_all_genes_filtered_cells.rds")) #SingleCellExperiment, includes a bulk sample!
+gmeta<-scan(file=fp(bp,"extdata/genes_patel_used.txt"),what="character")
+meta<-colData(mgh26)
+mgh26<-mgh26[rownames(mgh26) %in% gmeta, meta$sampleType=="SC"]
+meta<-colData(mgh26)
+mgh26<-normalize_scran_monocle(mgh26,plot=FALSE)
+#m<-assay(mgh26,"counts") #a sparse Matrix
+#m[m<1]<-0
+#assay(mgh26,"counts")<-m
+m<-Matrix(assay(mgh26,"normcounts"),sparse=TRUE)
+#m[m<1]<-0
+assay(mgh26,"normcounts")<-m
+meta$detection_rate<-Matrix::colMeans(m>0)
+colData(mgh26)<-meta
+#store R object for future use
+saveRDS(mgh26,file=fp(bp,"data/MGH26/03_sce_filtered_genes_filtered_cells_normalized.rds"))
+#store scran, tpm, and census counts to disk for python-based programs
+sparse2disk(assay(mgh26,"normcounts"),fp(bp,"data/MGH26/Yscran.tsv"))
+sparse2disk(assay(mgh26,"tpm"),fp(bp,"data/MGH26/Ytpm.tsv"))
+sparse2disk(assay(mgh26,"monocle_census_counts"),fp(bp,"data/MGH26/Ymonocle.tsv"))
+#write.table(as.data.frame(colData(mgh26)),file=fp(bp,"data/MGH26/phenodata.tsv"),row.names=FALSE,quot=FALSE)
+```
