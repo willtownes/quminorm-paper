@@ -60,8 +60,7 @@ ggplot(pd2,aes(x=reads,y=umi,group=umi,fill=umi))+geom_density_ridges(stat="binl
 pd2$umi_cat<-paste(pd2$umi,"UMIs")
 pd2$umi_cat[pd2$umi_cat=="1 UMIs"]<-"1 UMI"
 
-ggplot(pd2,aes(x=reads,y=umi_cat,group=umi_cat,fill=umi_cat))+geom_density_ridges(stat="binline",bins=30,scale=0.95,draw_baseline=FALSE)+facet_wrap(~cell,scales="fixed")+theme(legend.position = "none")+xlab("read counts")+ylab(element_blank())
-
+ggplot(pd2,aes(x=reads,y=umi_cat,fill=umi_cat)) +geom_density_ridges(stat="binline",bins=30,scale=0.95,draw_baseline=FALSE) +facet_wrap(~cell,scales="fixed") +xlab("read counts") +ylab(element_blank()) +theme(legend.position="none",axis.text.y=element_text(vjust=-1),axis.ticks.y=element_blank()) +scale_y_discrete(expand=expand_scale(mult=c(0.01, .2)))+scale_x_continuous(expand = expand_scale(mult=c(0.01, 0))) 
 ggsave(fp(plt_dir,"reads_per_umi_monocytes.pdf"),width=7,height=4)
 
 #ggplot(pd2,aes(x=factor(umi),y=reads,fill=cell))+geom_boxplot()+theme(legend.position = "none")
