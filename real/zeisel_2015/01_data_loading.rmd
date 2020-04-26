@@ -67,7 +67,7 @@ sce<-SingleCellExperiment(assays=list(counts=m),colData=cmeta,rowData=gmeta)
 saveRDS(sce,file=fp(bp,"data/01_sce_all_genes_all_cells.rds"))
 ```
 
-### Normalization
+### Normalization and Feature Selection
 
 Scran size factors
 
@@ -75,7 +75,14 @@ Scran size factors
 sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
 cl<-scran::quickCluster(sce)
 sce<-scran::computeSumFactors(sce,clusters=cl)
-sce<-scater::normalize(sce)
+sce<-scater::logNormCounts(sce)
 #logcounts assay created, is log2(1+counts/scran size factor)
 ```
 
+rank genes by HVG, deviance, and highly expressed
+
+```{r}
+gm<-rank_all_genes(sce,total_umi="total_umi")
+rowData(sce)<-cbind(rowData(sce),gm)
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```

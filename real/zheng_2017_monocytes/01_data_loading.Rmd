@@ -1,7 +1,6 @@
 ---
 title: "Zheng 2017 Monocytes (Biological Negative Control)"
 author: "Will Townes"
-date: "12/04/2018"
 output:
   pdf_document: default
   html_document: default
@@ -40,7 +39,7 @@ saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
 # Compute SCRAN size factors
 #sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
 sce<-scran::computeSumFactors(sce)
-sce<-scater::normalize(sce)
+sce<-scater::logNormCounts(sce)
 #logcounts assay created, is log2(1+counts/scran size factor)
 saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
 ```

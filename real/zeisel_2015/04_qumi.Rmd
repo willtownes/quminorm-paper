@@ -8,7 +8,7 @@ Estimate poisson-lomax, poisson-lognormal, and negative binomial (poisson-gamma)
 
 ```{r}
 suppressPackageStartupMessages(library(SingleCellExperiment))
-# library(ggplot2); theme_set(theme_bw())
+library(ggplot2); theme_set(theme_bw())
 source("./algs/quminorm.R") #also loads nblomax.R
 source("./algs/poilog.R")
 fp<-file.path
@@ -24,18 +24,24 @@ sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
 m<-counts(sce)
 ```
 
+## Exploratory log-log plots
+
 PMF of random cell, compare poisson-lomax with poisson-lognormal
 
 ```{r}
+plt_name<-"lpmf_llcurve_zeisel.pdf"
 i<-1200
-colnames(m)[i] #cell ID="cell1146"
+colnames(m)[i]
 #set.seed(222)
 #i<-sample.int(ncol(m),size=1)
 x<-m[,i]
+
 (th<-poilog_mle(x))
 (th2<-plomax_mle(x,quadpts=1000))
+(th3<-nb_mle(x))
 res<-lpmf(x,doplot=FALSE)
-xmax<-expm1(7.0)
+xmax<-expm1(1.1*max(res$x))
+ymin<-1.1*min(res$y)
 
 fpoilog<-function(t){
   sads::dpoilog(floor(exp(t)),mu=th[1],sig=th[2],log=TRUE)
@@ -43,54 +49,88 @@ fpoilog<-function(t){
 fplomax<-function(t){
   dplomax(floor(exp(t)),tail=th2[1],scale=th2[2],log=TRUE,quadpts=5000)
 }
+fnb<-function(t){
+  dnbinom(floor(exp(t)),size=th3[1],mu=th3[2],log=TRUE)
+}
 
-pdf(file=fp(plt_dir,"lpmf_llcurve_zeisel.pdf"),width=5,height=5)
-lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(-18,0),xlim=c(-log(2),log(xmax)),cex=1.2)
-curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=2)
-curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=2,lty=2)
-points(rep(-log(2),2),c(fpoilog(-Inf),fplomax(-Inf)),col=c("blue","green"),pch=c(1,19),cex=c(.8,.3))
-legend("topright",c("Poisson-lognormal","Poisson-Lomax"),col=c("blue","green"),lty=c(1,2),lwd=2)
+pdf(file=fp(plt_dir,plt_name),width=4,height=4)
+marpar<-par("mar"); par(mar=c(4,4,.5,.5))
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(ymin,0),xlim=c(-log(2),log(xmax)),cex=2,lwd=3)
+curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=3)
+curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=3,lty=2)
+curve(fnb,from=log(1),to=log(xmax),add=TRUE,col="red",lwd=3,lty=3)
+points(rep(-log(2),3),c(fpoilog(-Inf),fplomax(-Inf),fnb(-Inf)),col=c("blue","green","red"),pch=c(1,1,19),cex=c(1.6,.9,.4),lwd=3)
+legend("topright",c("Poisson-lognormal","Poisson-Lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=3)
+par(mar=marpar)
 dev.off()
 ```
 
-Compute MLEs for all cells `time Rscript ./real/util/mles_qumi.R ./real/zeisel_2015` or `sbatch -J zeisel ./real/util/mles_qumi.slurm ./real/zeisel_2015`
+## Compute MLEs for all cells 
+
+`time Rscript ./real/util/mles_qumi.R ./real/zeisel_2015 data/01_sce_all_genes_all_cells.rds` 
+or 
+`sbatch -J zeisel ./real/util/mles_qumi.slurm ./real/zeisel_2015 data/01_sce_all_genes_all_cells.rds`
+
+## Goodness of fit 
+
+### BIC
 
 ```{r}
-nb<-read.table(fp(bp,"data/mle_nb.txt"),header=TRUE)
-lx<-read.table(fp(bp,"data/mle_poilomax.txt"),header=TRUE)
-ln<-read.table(fp(bp,"data/mle_poilog.txt"),header=TRUE)
-good<-!is.na(lx$tail) & !is.na(ln$mu) & !is.na(nb$size)
-table(good) #all good
+pd<-read.table(fp(bp,"results/mle_merged.txt"),header=TRUE)
+ln<-subset(pd,method=="poilog")
+lx<-subset(pd,method=="poilomax")
+nb<-subset(pd,method=="negbinom")
 #when is poilog best?
 mean(ln$bic<pmin(lx$bic,nb$bic))
 #when is poisson-lomax best?
 mean(lx$bic<pmin(ln$bic,nb$bic))
 #nb best?
 mean(nb$bic<pmin(ln$bic,lx$bic))
+with(pd,boxplot(bic~method)) #very small differences
 ```
 
-Based on BIC, in 91% of cells, Poisson-lognormal fits best. In 0.1% of cells Poisson-lomax fits best. In 8.9% of cells, negative binomial fits best.
+Based on BIC, in 91% of cells, Poisson-lognormal fits best. In 0.1% of cells Poisson-lomax fits best. In 8.9% of cells, negative binomial fits best. The overall differences between methods are very small according to BIC.
 
-Comparing fitted MLEs to summary statistics
+### Predictive check based on simulated maxima
+
+See *real/zhao_2019/02_qumi.Rmd* for a details.
 
 ```{r}
-cm<-colData(sce)
-z<-log10(colSums(m))
-hist(ln$sig,breaks=100)
-boxplot(ln$sig~cm$tissue)
-boxplot(ln$sig~cm$level1class)
-plot(z,ln$sig)
-plot(z,ln$mu)
-
-hist(lx$tail,breaks=100)
-boxplot(lx$tail~cm$tissue)
-boxplot(lx$tail~cm$level1class)
-plot(z,lx$tail)
-plot(z,log(lx$scale))
-
-hist(nb$size,breaks=100)
-boxplot(nb$size~cm$tissue)
-boxplot(nb$size~cm$level1class)
+cpmax<-read.table(fp(bp,"results/compare_maxima.txt"),header=TRUE)
+cpmax$log_err<-log(cpmax$sim_max)-log(cpmax$true_max)
+ggplot(cpmax,aes(x=log_err))+geom_histogram()+facet_wrap(~method,scales="free")
 ```
 
-For neg binom, the size parameter ranges from .05 to .2 with .12 a typical value. For poisson-lognormal the sig parameter ranges from 1.8-3.0 with typical value 2.2. For poisson-lomax the tail parameter distribution is bimodal with peaks at 0.9 and 2.0. The bimodality in the neg binom size parameter is driven by cell type but not the bimodality in the poi lomax tail parameter.
+Negative binomial underestimates the maximum, Poisson-lognormal is well-calibrated, and Poisson-Lomax overestimates.
+
+## Distributions of parameter estimates (MLEs)
+
+```{r}
+pd<-read.table(fp(bp,"results/mle_merged.txt"),header=TRUE)
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+sce<-sce[,as.character(unique(pd$cell))]
+cm<-colData(sce)
+m<-counts(sce)
+cm$cell<-rownames(cm)
+pd<-merge(pd,as.data.frame(cm),by="cell")
+```
+
+```{r}
+ggplot(pd,aes(x=shape))+geom_histogram(bins=100)+facet_wrap(~method,scales="free")
+ggplot(pd,aes(x=tissue,y=shape))+geom_boxplot()+facet_grid(~method,scales="free_x")+coord_flip()
+ggplot(pd,aes(x=level1class,y=shape))+geom_boxplot()+facet_grid(~method,scales="free_x")+coord_flip()
+```
+
+For neg binom, the size parameter is somewhat bimodal and ranges from .05 to .2 with .12 a typical value. For poisson-lognormal the sig parameter ranges from 1.8-3.0 with typical value 2.2. For poisson-lomax the tail parameter distribution is strongly bimodal with peaks at 0.9 and 2.0. 
+
+There does appear to be some tissue and cell-type specificity to the shape parameter estimates but neither of these completely aligns with the bimodality in an obvious way.
+
+### Comparing fitted MLEs to summary statistics
+
+```{r}
+# z<-log10(colSums(m))
+# plot(z,ln$sig)
+# plot(z,ln$mu)
+# plot(z,lx$tail)
+# plot(z,log(lx$scale))
+```

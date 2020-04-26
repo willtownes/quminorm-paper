@@ -45,11 +45,9 @@ names(spp)<-c("Homo sapiens","Mus musculus")
 parse_sra_csv(bp,"DropSeq",spp) #from ../util/data_loading.R
 ```
 
-refer to `../util/preprocessing.Rmd` for how to download the files, convert to fastq format, pseudoalign with kallisto, and process the resulting bus files so they can be parsed into a counts matrix.
-
 # Processing FASTQs into BUS files with Kallisto
 
-Refer to *../util/preprocessing.Rmd* for how to download the files, convert to fastq format, pseudoalign with kallisto, and process the resulting bus files with bustools.
+Refer to *../util/preprocessing.Rmd* for how to download the files, convert to fastq format, pseudoalign with kallisto, and process the resulting bus files with bustools so they can be parsed into a counts matrix. Note: Kallisto version 0.45.1 was used for this dataset.
 
 # Load gene counts into sparse matrix
 

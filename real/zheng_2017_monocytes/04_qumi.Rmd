@@ -1,7 +1,6 @@
 ---
 title: "Quasi-UMIs for Zheng 2017 Monocytes dataset"
 author: "Will Townes"
-date: "4/10/2019"
 output: html_document
 ---
 
@@ -101,7 +100,7 @@ normalize read counts with scran and census counts
 
 ```{r}
 sce2<-sce
-sz<-scran::computeSumFactors(rc)
+sz<-scran::calculateSumFactors(rc)
 assay(sce2,"scran_counts")<-t(t(rc)/sz)
 assay(sce2,"cpm")<-t(t(rc)/Matrix::colSums(rc))*1e6
 # First create a CellDataSet from the relative expression levels
@@ -154,7 +153,7 @@ ggplot(res,aes(x=x,y=y,group=id))+geom_line(alpha=.1)+xlab("log(1+x)")+ylab("log
 ggsave(fp(plt_dir,"lpmf_allcells_monocytes.pdf"),width=6,height=4)
 ```
 
-poisson-lomax quantile normalization of read counts
+Poisson-Lomax and Poisson-lognormal quantile normalization of read counts
 
 ```{r}
 i<-sample.int(ncol(rc),size=1)
@@ -195,7 +194,7 @@ plot(log1p(umi),log1p(cc),main="Census Counts")
 abline(0,1)
 ```
 
-#see if quasi-UMI improves over other normalizations
+### see if quasi-UMI improves over other normalizations
 
 Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
 
@@ -215,37 +214,44 @@ dfunc<-function(dat,metric="euclidean"){
 dfunc(dat)
 ```
 
-apply QUMI to entire data matrix 
+### Apply QUMI to entire data matrix 
+
+First we create a configuration file (JSON) to keep track of all the shape parameters for each model. Note that for Poisson-lognormal, 2.4 is the median of the monocytes-specific MLE distribution in the *zhang_2019* training dataset.
+
+```{r}
+shp<-list(nb=.1,poilog=c(1,2,2.4,3),plomax=1)
+write(jsonlite::toJSON(shp,pretty=TRUE),file=fp(bp,"quminorm_script_config.json"))
+```
+
 ```{bash}
-Rscript ./real/util/quminorm_script.R ./real/zheng_2017_monocytes/data/01_sce_all_genes_all_cells.rds ./real/zheng_2017_monocytes/data/02_sce_qumi.rds
+Rscript ./real/util/quminorm_script.R ./real/zheng_2017_monocytes data/01_sce_all_genes_all_cells.rds data/02_sce_qumi.rds
 ```
 or 
 ```{bash}
-sbatch -J monocytes ./real/util/quminorm_script.slurm ./real/zheng_2017_monocytes/data/01_sce_all_genes_all_cells.rds ./real/zheng_2017_monocytes/data/02_sce_qumi.rds
+sbatch -J monocytes ./real/util/quminorm_script.slurm ./real/zheng_2017_monocytes data/01_sce_all_genes_all_cells.rds data/02_sce_qumi.rds
 ```
 
-For sensitivity analysis, additional poilog quminorm with sig=1.0 instead of 2.0
+compare distances between normalizations for all cells. Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
 
 ```{r}
 sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
-#5 minutes
-system.time(assay(sce2,"qumi_poilog1")<-quminorm_matrix(rc,1.0,lik="poilog"))
-saveRDS(sce2,file=fp(bp,"data/02_sce_qumi.rds"))
-```
-
-compare distances between normalizations for all cells
-
-```{r}
-#sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
-res<-distance_compare(sce2)
+system.time(res<-distance_compare(sce2))
 write.table(res,file=fp(bp,"results/qumi_distance.txt"),quote=FALSE,row.names=FALSE)
+```
+or
+```{bash}
+Rscript ./real/util/qumi_dist_compare_script.R ./real/zheng_2017_monocytes/data/02_sce_qumi.rds ./real/zheng_2017_monocytes/results/qumi_distance.txt
+```
+or
+```{bash}
+sbatch -J monocytes_dist_comp ./real/util/qumi_dist_compare_script.slurm ./real/zheng_2017_monocytes/data/02_sce_qumi.rds ./real/zheng_2017_monocytes/results/qumi_distance.txt
 ```
 
 graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
 
 ```{r}
 library(tidyverse)
-res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
+res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE,sep=" ")
 pd<-tidyr::gather(res,key="method",value="distance",-cell)
 pd<-subset(pd,method!="counts")
 pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
@@ -259,7 +265,7 @@ visualize the QUMI normalization transform
 
 ```{r}
 #sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
-qumi<-assay(sce2,"qumi_poilog")
+qumi<-assay(sce2,"qumi_poilog_2.4")
 rc<-assay(sce2,"read_counts")
 cc<-assay(sce2,"census_counts")
 q<-qumi[,51]
@@ -268,6 +274,32 @@ cs<-cc[,51]
 plot(r,q)
 abline(0,.01)
 plot(r,round(cs))
+```
+
+### MA plot and CV comparison between normalizations
+
+A reviewer suggests that the differences between QUMIs and UMIs may depend on the expression level of the gene. To visualize this, we compute an MA plot between the UMI counts and each of the normalizations. Since MA plot requires a single vector for each "condition", we just average the counts across all cells for each gene.
+
+We also compute the MA plot contrasting the coefficients of variation instead of the average expression.
+
+```{r}
+sce<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+umi<-assay(sce,"counts")
+x<-log2(rowMeans(umi))
+cv0<-log2(apply(umi,1,sd))-x
+f<-function(a){
+  alt<-assay(sce,a)
+  y<-log2(rowMeans(alt))
+  cv<-log2(apply(alt,1,sd))-y
+  data.frame(method=a,mean_a=.5*(x+y),mean_m=y-x,cv_a=.5*(cv+cv0),cv_m=cv-cv0)
+}
+anames<-c("read_counts","qumi_poilog_2","scran_counts","census_counts")
+res<-do.call(rbind,lapply(anames,f))
+res$method<-plyr::mapvalues(res$method,from="qumi_poilog_2",to="qumi_counts")
+write.table(res,fp(bp,"results/qumi_maplot.txt"),quote=FALSE,row.names=FALSE)
+#rownames(res)<-NULL
+ggplot(res,aes(x=mean_a,y=mean_m))+geom_point(alpha=.9,size=.5)+facet_wrap(~method,nrow=2,scales="free_x")+xlab("average log expression (A)")+ylab("difference in log expression (M)")+geom_hline(yintercept=0,colour="blue")
+ggplot(res,aes(x=cv_a,y=cv_m))+geom_point(alpha=.9,size=.5)+facet_wrap(~method,nrow=2,scales="free_x")+xlab("average log CV (A)")+ylab("difference in log CV (M)")+geom_hline(yintercept=0,colour="blue")
 ```
 
 ## Approaches that didn't work well

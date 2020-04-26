@@ -1,7 +1,6 @@
 ---
 title: "Quasi-UMIs for Macosko 2015"
 author: "Will Townes"
-date: "4/10/2019"
 output: html_document
 ---
 
@@ -26,18 +25,6 @@ if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
 data loading
 
 ```{r}
-filter_genes_pct<-function(sce,thresh=.01,assay_name="counts"){
-  #removes all genes that are not expressed in at least .01*n cells
-  #.01= (1 percent) and n=ncol(m)=number of total cells in the data matrix
-  #returns a SingleCellExperiment whose rows are the subset of rows of m satisfying the criterion.
-  #columns of the matrix with all zeros are also removed.
-  m<-assay(sce,assay_name)
-  gg<-rowSums(m>0) > (thresh*ncol(m))
-  sce<-sce[gg,]
-  gc<-colSums(m)>0
-  sce[,gc]
-}
-
 sce<-readRDS(fp(bp,"data/02_sce_subset_r6.rds"))
 m<-counts(sce)
 rc<-assay(sce,"read_counts")
@@ -72,39 +59,71 @@ ggplot(res,aes(x=x,y=y,group=id))+geom_line(alpha=.1)+xlab("log(1+x)")+ylab("log
 ggsave(fp(plt_dir,"lpmf_allcells_macosko.pdf"),width=6,height=4)
 ```
 
-apply QUMI to entire data matrix 
+### Apply QUMI to entire data matrix 
+
+First we create a configuration file (JSON) to keep track of all the shape parameters for each model. Note that for Poisson-lognormal, 1.9 is the median of the iPSC-specific MLE distribution in the *clark_2019* training dataset.
+
+```{r}
+shp<-list(nb=.1,poilog=c(1,2,1.9,3),plomax=1)
+write(jsonlite::toJSON(shp,pretty=TRUE),file=fp(bp,"quminorm_script_config.json"))
+```
 
 ```{bash}
-Rscript ./real/util/quminorm_script.R ./real/macosko_2015/data/02_sce_subset_r6.rds ./real/macosko_2015/data/03_sce_qumi_r6.rds
+Rscript ./real/util/quminorm_script.R ./real/macosko_2015 data/02_sce_subset_r6.rds data/03_sce_qumi_r6.rds
 ```
 or 
 ```{bash}
-sbatch -J macosko ./real/util/quminorm_script.slurm ./real/macosko_2015/data/02_sce_subset_r6.rds ./real/macosko_2015/data/03_sce_qumi_r6.rds
-```
-
-For sensitivity analysis, additional poilog quminorm with sig=1.0 instead of 2.0
-
-```{r}
-sce2<-readRDS(fp(bp,"data/03_sce_qumi_r6.rds"))
-#20 minutes
-system.time(assay(sce2,"qumi_poilog1")<-quminorm_matrix(rc,1.0,lik="poilog"))
-saveRDS(sce2,file=fp(bp,"data/03_sce_qumi_r6.rds"))
+sbatch -J macosko ./real/util/quminorm_script.slurm ./real/macosko_2015 data/02_sce_subset_r6.rds data/03_sce_qumi_r6.rds
 ```
 
 compare distances between normalizations for all cells. Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
 
 ```{r}
 sce2<-readRDS(fp(bp,"data/03_sce_qumi_r6.rds"))
-res<-distance_compare(sce2)
-#sce3<-sce2
-#assays(sce3)<-assays(sce2)[c("counts","qumi_poilog1")]
-#res2<-distance_compare(sce3)
-#res$qumi_poilog1<-res2$qumi_poilog1
+system.time(res<-distance_compare(sce2))
 write.table(res,file=fp(bp,"results/qumi_distance.txt"),quote=FALSE,row.names=FALSE)
 ```
+or
+```{bash}
+Rscript ./real/util/qumi_dist_compare_script.R ./real/macosko_2015/data/03_sce_qumi_r6.rds ./real/macosko_2015/results/qumi_distance.txt
+```
+or
+```{bash}
+sbatch -J macosko_dist_comp ./real/util/qumi_dist_compare_script.slurm ./real/macosko_2015/data/03_sce_qumi_r6.rds ./real/macosko_2015/results/qumi_distance.txt
+```
+
+### see if quasi-UMI improves over other normalizations
+
+graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
+
+```{r}
+res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
+pd<-tidyr::gather(res,key="method",value="distance",-cell)
+pd<-subset(pd,method!="counts")
+pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
+o<-order(pd2$med_dist)
+pd$method<-factor(pd$method,levels=pd2$method[o])
+ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"dist_comp_macosko.pdf"),width=6,height=4)
+```
+
+### Filtering genes based on percentage expressed
 
 What if we prefilter genes based on a percentage threshold instead of a fixed threshold? Does splitting the data into 10 smaller batches affect the quminorm results? 
+
 ```{r}
+filter_genes_pct<-function(sce,thresh=.01,assay_name="counts"){
+  #removes all genes that are not expressed in at least .01*n cells
+  #.01= (1 percent) and n=ncol(m)=number of total cells in the data matrix
+  #returns a SingleCellExperiment whose rows are the subset of rows of m satisfying the criterion.
+  #columns of the matrix with all zeros are also removed.
+  m<-assay(sce,assay_name)
+  gg<-rowSums(m>0) > (thresh*ncol(m))
+  sce<-sce[gg,]
+  gc<-colSums(m)>0
+  sce[,gc]
+}
+
 qumifunc<-function(sce){
   quminorm_matrix(assay(sce,"read_counts"),2.0,lik="poilog")
 }
@@ -147,30 +166,6 @@ ggplot(res2,aes(x=thresh,y=chg,fill=thresh))+geom_boxplot()+xlab("gene filtering
 ```
 
 ```{r}
-#i<-sample.int(ncol(rc),size=1)
-umi<-m[,i]
-x<-rc[,i]
-#poisson-lomax qumi
-(th<-plomax_mle(umi,quadpts=1000))
-xqumi<-quminorm_plomax(x,shape=th[1],sc=th[2])
-#poisson-lognormal qumi
-(th2<-poilog_mle(umi))
-xqumi2<-quminorm_poilog(x,shape=th2[2],sc=th2[1])
-#negative binomial qumi
-(th3<-nb_mle(umi))
-xqumi3<-quminorm_nb(x,shape=th3[1],sc=th3[2])
-#plot qumi distributions and compare to actual UMI
-lpmf(xqumi,type="l",col="green",lty=2,lwd=2)
-lpmf(umi,add=TRUE,type="p",cex=2)
-lpmf(xqumi2,add=TRUE,type="l",col="blue",lty=1,lwd=2)
-lpmf(xqumi3,add=TRUE,type="l",col="red",lty=3,lwd=2)
-cc<-ceiling(assay(sce2,"census_counts")[,i])
-lpmf(cc,add=TRUE,type="l",col="orange",lty=2,lwd=2)
-legend("topright",c("negative binomial","poisson-lognormal","poisson-lomax","census counts"),lty=c(3,1,2,2),col=c("red","blue","green","orange"),lwd=2)
-title("Quasi-UMIs vs Actual UMIs")
-```
-
-```{r}
 #Poisson-lomax tends to overestimate
 plot(log1p(umi),log1p(xqumi),main="Poisson-Lomax Quasi-UMIs")
 abline(0,1)
@@ -185,17 +180,3 @@ plot(log1p(umi),log1p(cc),main="Census Counts")
 abline(0,1)
 ```
 
-#see if quasi-UMI improves over other normalizations
-
-graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
-
-```{r}
-res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
-pd<-tidyr::gather(res,key="method",value="distance",-cell)
-pd<-subset(pd,method!="counts")
-pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
-o<-order(pd2$med_dist)
-pd$method<-factor(pd$method,levels=pd2$method[o])
-ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts")
-ggsave(fp(plt_dir,"dist_comp_macosko.pdf"),width=6,height=4)
-```
