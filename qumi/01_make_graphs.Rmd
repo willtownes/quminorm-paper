@@ -1,33 +1,35 @@
 ---
 title: "QUMIs"
 author: "Will Townes"
-date: "4/15/2019"
 output: html_document
 ---
 
 ```{r}
-library(tidyverse)
-library(ggplot2); theme_set(theme_bw())
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(tidyverse); theme_set(theme_bw())
 library(ggridges)
 fp<-file.path
 plt_dir<-fp("./qumi/results/fig")
 if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
 ```
 
-load MLEs and BIC values for the three training datasets for all three models.
+## Training Data Plots
+
+load MLEs and BIC values for the seven training datasets for all three models.
 
 ```{r}
 klein_celltypes<-SingleCellExperiment::colData(readRDS("./real/klein_2015/data/01_sce_all_genes_all_cells.rds"))$cell_type1
 klein_groups<-as.character(klein_celltypes)
 klein_groups[klein_groups %in% c("d0","d7")]<-"d0d7"
 klein_groups[klein_groups %in% c("d2","d4")]<-"d2d4"
-dats<-c("cao_2017","klein_2015","zeisel_2015")
+
+dats<-c("cao_2017","clark_2019","grun_2016","klein_2015","schiebinger_2019","zeisel_2015","zhang_2019")
 mods<-c("nb","poilog","poilomax")
 res<-list()
 for(m in mods){
   res[[m]]<-list()
   for(d in dats){
-    df<-read.table(fp("./real",d,"data",paste0("mle_",m,".txt")),header=TRUE)
+    df<-read.table(fp("./real",d,"results",paste0("mle_",m,".txt")),header=TRUE)
     df$dataset<-if(d=="klein_2015"){ paste(d,klein_groups,sep="_") } else { d }
     df$model<-m
     df$cell_id<-rownames(df)
@@ -59,7 +61,9 @@ Make plots of MLEs
 ggplot(res2[["nb"]],aes(x=size,y=dataset,fill=dataset))+geom_density_ridges(scale=1.8,alpha=.9,rel_min_height=.0001)+theme(legend.position="none")+xlab("shape")+scale_x_log10()
 ggsave(fp(plt_dir,"nb_mles.pdf"),width=3,height=2.7)
 
-ggplot(res2[["poilog"]],aes(x=sig,y=dataset,fill=dataset))+geom_density_ridges(scale=1.8,alpha=.9,rel_min_height=.0001)+theme(legend.position="none")+xlab("shape")+ylab(NULL)+scale_x_log10()
+#exclude shape<.1, only small number of outlier cells this low 
+rplg<-subset(res2[["poilog"]],sig>.1)
+ggplot(rplg,aes(x=sig,y=dataset,fill=dataset))+geom_density_ridges(scale=1.8,alpha=.9,rel_min_height=.0001)+theme(legend.position="none")+xlab("shape")+ylab(NULL)+scale_x_log10()
 ggsave(fp(plt_dir,"poilog_mles.pdf"),width=3,height=2.7)
 ggsave(fp(plt_dir,"poilog_mles_big.pdf"),width=6,height=4)
 
@@ -67,14 +71,60 @@ ggplot(res2[["poilomax"]],aes(x=tail,y=dataset,fill=dataset))+geom_density_ridge
 ggsave(fp(plt_dir,"poilomax_mles.pdf"),width=3,height=2.7)
 ```
 
+Does Poisson-lognormal shape parameter correlate with total counts or detection rate?
+
+```{r}
+#dats<-c("cao_2017","clark_2019","grun_2016","klein_2015","schiebinger_2019","zeisel_2015","zhang_2019")
+pd<-res2[["poilog"]]
+pd$model<-NULL
+pd$dataset<-as.character(pd$dataset)
+pd$dataset[grepl("klein_2015_",pd$dataset,fixed=TRUE)]<-"klein_2015"
+pd$dataset<-factor(pd$dataset)
+f<-function(d){
+  if(d=="clark_2019"){
+    scefile<-"02_sce_subset_p14.rds"
+  } else {
+    scefile<-"01_sce_all_genes_all_cells.rds"
+  }
+  m<-counts(readRDS(fp("real",d,"data",scefile)))
+  tot<-colSums(m)
+  pz<-1-colMeans(m>0)
+  tot_gene<-colSums(m>0)
+  data.frame(dataset=d,cell_id=colnames(m),total_umi=tot,zero_frac=pz,total_genes=tot_gene)
+}
+res<-do.call(rbind,lapply(dats,f))
+pd2<-merge(pd,res,by=c("dataset","cell_id"),all=FALSE)
+ggplot(pd2,aes(x=total_umi,y=sig))+geom_point()+facet_wrap(~dataset,scales="free")+scale_x_log10()
+ggplot(pd2,aes(x=zero_frac,y=sig))+geom_point()+facet_wrap(~dataset,scales="free")
+ggplot(pd2,aes(x=total_genes,y=sig))+geom_point()+facet_wrap(~dataset,scales="free")
+knitr::kable(pd2 %>% group_by(dataset) %>% subset(!is.na(sig)) %>% summarize(corr=cor(sig,total_genes)) %>% arrange(corr))
+```
+
 Make plots of BIC
 
 ```{r}
 bic_df$dataset<-as.character(bic_df$dataset)
 bic_df$dataset[grep("klein_2015",bic_df$dataset)]<-"klein_2015"
-ggplot(bic_df,aes(x=model,fill=model,y=-loglik))+geom_boxplot()+facet_wrap(~dataset,scales="free")+scale_y_log10()+theme(axis.title.x=element_blank(),axis.text.x=element_blank(),axis.ticks.x=element_blank())+ylab("negative log likelihood")
-ggsave(fp(plt_dir,"loglik_boxplot.pdf"),width=6,height=4)
+ggplot(bic_df,aes(x=model,fill=model,y=bic))+geom_boxplot()+facet_wrap(~dataset,scales="free",nrow=3)+scale_y_log10()+theme(axis.title.x=element_blank(),axis.text.x=element_blank(),axis.ticks.x=element_blank(),legend.position=c(.5,.15))+ylab("Bayesian information criterion (BIC)")
+ggsave(fp(plt_dir,"bic_boxplot.pdf"),width=6,height=6)
 ```
+
+Load and plot results from comparisons based on simulated maxima
+
+```{r}
+dats<-c("cao_2017","clark_2019","grun_2016","klein_2015","schiebinger_2019","zeisel_2015","zhang_2019")
+f<-function(d){
+  x<-read.table(fp("real",d,"results/compare_maxima.txt"),header=TRUE)
+  x$dataset<-d
+  x
+}
+pd<-do.call(rbind,lapply(dats,f))
+pd$log_err<-log(pd$sim_max)-log(pd$true_max)
+ggplot(pd,aes(x=log_err))+geom_histogram(bins=50)+facet_grid(dataset~method,scales="free")+geom_vline(xintercept=0,col="red")+xlab("log ratio of simulated versus observed maxima")+ylab("number of cells in bin")
+ggsave(fp(plt_dir,"cpmax_hist.pdf"),width=6,height=9)
+```
+
+## Test Data Plots
 
 Load distance scores
 
@@ -85,17 +135,85 @@ for(d in dats){
   res[[d]]<-read.table(fp("./real",d,"results/qumi_distance.txt"),header=TRUE)
   res[[d]]$dataset<-d
 }
+res0<-res #cache for use by later code cells
+```
+
+```{r}
+res<-res0
+keep<-c("dataset","cell","read_counts","census_counts")
+res$macosko_2015<-res$macosko_2015[,c(keep,"qumi_poilog_1.9","qumi_poilog_2")]
+res$tung_2016<-res$tung_2016[,c(keep,"qumi_poilog_2.4","qumi_poilog_2")]
+res$zheng_2017_monocytes<-res$zheng_2017_monocytes[,c(keep,"qumi_poilog_2.4","qumi_poilog_2")]
+for(d in dats){
+  colnames(res[[d]])[5:6]<-paste0("qumi_",c("custom","default"))
+}
 res<-do.call(rbind,res)
 rownames(res)<-NULL
 
 pd<-gather(res,key="method",value="distance",-c(dataset,cell))
-pd<-subset(pd,method!="counts")
 pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
 o<-order(pd2$med_dist,decreasing=FALSE)
 pd$method<-factor(pd$method,levels=pd2$method[o])
-#pd3<-subset(pd,!(method %in% c("scran_counts","cpm")))
-pd3<-subset(pd,method %in% c("read_counts","census_counts","qumi_poilog","qumi_poilog1"))
-pd3$method<-plyr::mapvalues(pd3$method,from=c("read_counts","census_counts","qumi_poilog","qumi_poilog1"),to=c("reads","census","qumi2","qumi1"))
-ggplot(pd3,aes(x=method,y=distance,fill=method,colour=method))+geom_boxplot()+scale_y_log10()+ylab("distance from UMI counts")+facet_wrap(~dataset,nrow=1,scales="free")+theme(legend.position="none")#+theme(axis.text.x = element_text(angle = 15, hjust=1)) #+coord_flip()
+ggplot(pd,aes(x=method,y=distance,fill=method,colour=method))+geom_boxplot()+scale_y_log10()+ylab("distance from UMI counts")+facet_wrap(~dataset,nrow=1,scales="free")+theme(legend.position="none")+theme(axis.text.x = element_text(angle = 20, hjust=1)) #+coord_flip()
 ggsave(fp(plt_dir,"dist_comp.pdf"),width=7,height=3)
+```
+
+sensitivity analysis: examine effect of a grid of values for poilog shape param
+
+```{r}
+res<-res0
+keep<-c("dataset","cell","read_counts","census_counts",paste0("qumi_poilog_",1:3))
+for(d in dats){
+  res[[d]]<-res[[d]][,keep]
+}
+res<-do.call(rbind,res)
+rownames(res)<-NULL
+cn<-colnames(res)
+cn<-sub("qumi_poilog_","qumi",cn,fixed=TRUE)
+cn<-sub("census_counts","census",cn,fixed=TRUE)
+cn<-sub("read_counts","reads",cn,fixed=TRUE)
+colnames(res)<-cn
+
+pd<-gather(res,key="method",value="distance",-c(dataset,cell))
+pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
+o<-order(pd2$med_dist,decreasing=FALSE)
+pd$method<-factor(pd$method,levels=pd2$method[o])
+ggplot(pd,aes(x=method,y=distance,fill=method,colour=method))+geom_boxplot()+scale_y_log10()+ylab("distance from UMI counts")+facet_wrap(~dataset,nrow=1,scales="free")+theme(legend.position="none")+theme(axis.text.x = element_text(angle = 20, hjust=1)) #+coord_flip()
+ggsave(fp(plt_dir,"dist_comp_sensitivity.pdf"),width=7,height=3)
+```
+
+are distance scores affected by total read counts?
+
+```{r}
+dats<-c("macosko_2015","tung_2016","zheng_2017_monocytes")
+sce<-list()
+sce[["macosko_2015"]]<-readRDS("./real/macosko_2015/data/02_sce_subset_r6.rds")
+sce[["tung_2016"]]<-readRDS("./real/tung_2016/data/01_sce_all_genes_all_cells.rds")
+sce[["zheng_2017_monocytes"]]<-readRDS("./real/zheng_2017_monocytes/data/01_sce_all_genes_all_cells.rds")
+sce2rc<-function(d){
+  rc<-Matrix::colSums(SummarizedExperiment::assay(sce[[d]],"read_counts"))
+  data.frame(dataset=d,cell=names(rc),total_read_counts=rc)
+}
+rc<-do.call(rbind,lapply(dats,sce2rc))
+pd4<-merge(pd3,rc)
+ggplot(pd4,aes(x=total_read_counts,y=distance,colour=method))+geom_point()+facet_wrap(~dataset,scales="free")+scale_y_log10()+scale_x_log10()
+```
+
+for all methods, the distance increases as total read count of a cell increases.
+
+### MA plots
+
+```{r}
+res1<-read.table(fp("./real/tung_2016/results/qumi_maplot.txt"),header=TRUE)
+res2<-read.table(fp("./real/zheng_2017_monocytes/results/qumi_maplot.txt"),header=TRUE)
+res1$dataset<-"tung_2016"
+res2$dataset<-"zheng_2017"
+res<-rbind(res1,res2)
+res$method<-factor(res$method,levels=c("read_counts","scran_counts","census_counts","qumi_counts"))
+
+ggplot(res,aes(x=mean_a,y=mean_m))+geom_hex(color="black",fill="black",bins=200,show.legend=FALSE)+facet_grid(dataset~method,scales="free_x")+xlab("average log expression (A)")+ylab("difference in log expression versus UMI counts (M)")+geom_hline(yintercept=0,colour="red")
+ggsave(fp(plt_dir,"maplot_mean.pdf"),width=6,height=4)
+
+ggplot(res,aes(x=cv_a,y=cv_m))+geom_hex(color="black",fill="black",bins=200,show.legend=FALSE)+facet_grid(dataset~method,scales="free_x")+xlab("average log CV (A)")+ylab("difference in log CV versus UMI counts (M)")+geom_hline(yintercept=0,colour="red")
+ggsave(fp(plt_dir,"maplot_cv.pdf"),width=6,height=4)
 ```

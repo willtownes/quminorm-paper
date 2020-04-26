@@ -1,0 +1,47 @@
+---
+title: "Comparison of Gene Distributions in Klein and Zeisel Data"
+author: "Will Townes"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(tidyr)
+library(ggplot2); theme_set(theme_bw())
+library(ggridges)
+#source("./algs/quminorm.R") #also loads nblomax.R, poilog.R
+fp<-file.path
+```
+
+data loading
+
+```{r}
+klein<-readRDS(fp("real/klein_2015/data/01_sce_all_genes_all_cells.rds"))
+zeisel<-readRDS(fp("real/zeisel_2015/data/01_sce_all_genes_all_cells.rds"))
+```
+
+```{r}
+set.seed(101)
+gnames<-intersect(rownames(klein),rownames(zeisel))
+gg<-sample(gnames,8)
+f<-function(sce,gg){
+  #convert counts to relative abundance 
+  #and subset out only the listed genes
+  m<-counts(sce)
+  sz<-colSums(m)
+  d<-t(t(m)/sz)
+  as.data.frame(t(d[gg,]))
+}
+klein1<-f(klein,gg)
+zeisel1<-f(zeisel,gg)
+klein1$data<-"klein"
+zeisel1$data<-"zeisel"
+pd0<-rbind(klein1,zeisel1)
+pd<-pivot_longer(pd0,cols=-"data",names_to="gene",values_to="expression")
+```
+
+Make histograms
+
+```{r}
+ggplot(subset(pd,expression>0),aes(x=expression,fill=data,y=data)) +geom_density_ridges(stat="binline",bins=30,draw_baseline=FALSE) +facet_wrap(~gene,scales="free",ncol=2)+scale_x_log10()+xlab("nonzero relative abundance")
+```
