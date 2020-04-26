@@ -1,0 +1,76 @@
+---
+title: "Compare effect of quminorm on differentially expressed genes"
+author: "Will Townes"
+output: html_document
+---
+
+```{r}
+library(amap) #distance metrics
+library(tidyverse); theme_set(theme_bw())
+suppressPackageStartupMessages(library(SingleCellExperiment))
+source("./algs/poisson_DE.R") #also loads nblomax.R,poilog.R
+fp<-file.path
+bp<-"./real/vieira_2019"
+
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+This data consists of four donors, three smokers (donors 1, 2, 4) and one nonsmoker (donor 3). The authors of the study provided cell type annotations as well. We focus on a contrast between gene expression between two types of cells in the nonsmoker donor.
+
+```{r}
+sce<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+cm<-colData(sce)
+sort(table(cm$celltype))
+ctypes<-c("Ciliated","Endothelium")
+sce<-sce[,cm$smoker=="no" & cm$celltype %in% ctypes]
+cm<-colData(sce)
+cond<-factor(cm$celltype)
+gg<- rowSums(counts(sce))>0
+sce<-sce[gg,]
+```
+
+Compute differential expression test statistics based on Fisher's Exact test.
+
+```{r}
+assay_list<-setdiff(assayNames(sce),c("cpm","scran_counts"))
+f<-function(a){
+  poisson_DE(assay(sce,a),cond,test_type="fisher")
+}
+pvals<-sapply(assay_list,f,simplify=FALSE,USE.NAMES=TRUE)
+pvals<-as.data.frame(pvals)
+rownames(pvals)<-rownames(sce)
+write.table(pvals,fp(bp,"results/pvals_ciliated_endothelium_nonsmoker.txt"),quote=FALSE)
+```
+
+compare pvalues using a variety of different metrics
+
+```{r}
+pvals<-read.table(fp(bp,"results/pvals_ciliated_endothelium_nonsmoker.txt"))
+d<-list()
+#manhattan distance
+d[["manhattan"]]<-as.matrix(Dist(t(pvals),"manhattan"))[,"counts"]
+#Kendall rank distance
+d[["kendall"]]<-as.matrix(Dist(t(pvals),"kendall"))[,"counts"]
+#Jaccard index of overlap in significantly DE genes
+f<-function(x,thresh=.05){ p.adjust(x)<thresh }
+gs<-apply(pvals,2,f)
+d[["jaccard"]]<-as.matrix(Dist(t(gs),"binary"))[,"counts"]
+g<-function(m){
+  data.frame(metric=m,normalization=names(d[[m]]),d=d[[m]])
+}
+pd<-do.call(rbind,lapply(names(d),g))
+rownames(pd)<-NULL
+pd2<- pd %>% group_by(metric) %>% mutate(drk=rank(d)) %>% ungroup()
+pd2<- pd2 %>% group_by(normalization) %>% summarize(rk=mean(drk)) %>% arrange(rk)
+pd$normalization<-factor(pd$normalization,levels=pd2$normalization)
+pd<-subset(pd,normalization!="counts")
+
+ggplot(pd,aes(x=normalization,y=d))+geom_bar(stat="identity")+facet_wrap(~metric,scales="free")+theme(axis.text.x=element_text(angle=45,hjust=1))+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"vieira_pvalue_dist_barplot_all.pdf"),width=6,height=4)
+
+pd2<-subset(pd,normalization %in% c("read_counts","census_counts","qumi_poilog","qumi_poilog1"))
+pd2$method<-plyr::mapvalues(pd2$normalization,from=c("read_counts","census_counts","qumi_poilog","qumi_poilog1"),to=c("reads","census","qumi2","qumi1"))
+ggplot(pd2,aes(x=method,y=d,fill=method))+geom_bar(stat="identity",color="black")+facet_wrap(~metric,scales="free")+theme(legend.position="none")+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"vieira_pvalue_dist_barplot.pdf"),width=7,height=3)
+```

@@ -1,0 +1,52 @@
+---
+title: "Zhang 2019 Synovial Tissue"
+author: "Will Townes"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(Matrix)
+fp<-file.path
+bp<-"./real/zhang_2019"
+if(!dir.exists(bp)){ dir.create(bp) }
+```
+
+[Defining inflammatory cell states in rheumatoid arthritis joint synovial tissues by integrating single-cell transcriptomics and mass cytometry](https://www.nature.com/articles/s41590-019-0378-1)
+
+Various cell types from human synovial tissue, includes samples with various autoimmune diseases. Protocol: CEL-Seq2, UMIs: yes, read counts: yes. Cell type annotations are reliable because they were determined by FACS.
+
+The data are available from ImmPort accession [SDY998](https://immport.org/shared/study/SDY998), click on "download" then "ResultFiles" and "RNA_sequencing_result". The file **ReadMe_expression_2017-05-12.725584.docx** explains the naming conventions and contents of each file. We will use the UMI counts matrix **celseq_matrix_ru1_molecules.tsv.725583.gz** and the cell type annotations from the metadata file **celseq_meta.tsv.725591.gz**. These three files can be downloaded manually using Aspera Connect from the ImmPort website. We will store them under the **data** subfolder for further processing.
+
+## Merge UMI counts and read counts into SingleCellExperiment object
+
+```{r}
+cm<-read.table(gzfile(fp(bp,"data/celseq_meta.tsv.725591.gz"),"r"),header=TRUE,sep="\t")
+m<-read.table(gzfile(fp(bp,"data/celseq_matrix_ru1_molecules.tsv.725583.gz"),"r"),header=TRUE,sep="\t")
+rownames(cm)<-cm$cell_name
+cm$cell_name<-NULL
+rownames(m)<-m$gene
+m$gene<-NULL
+m<-as.matrix(m)
+m[is.na(m)]<-0
+m<-Matrix(m)
+m<-m[,rownames(cm)] #match ordering of metadata
+sce<-SingleCellExperiment(assays=list(counts=m),colData=cm)
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+filter out the "empty" cell type
+
+```{r}
+#sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+sce<-sce[,colData(sce)$type!="Empty"]
+cm<-colData(sce)
+cm$type<-factor(cm$type)
+colData(sce)<-cm
+m<-counts(sce)
+gg<-rowSums(m)>0
+sce<-sce[gg,]
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```

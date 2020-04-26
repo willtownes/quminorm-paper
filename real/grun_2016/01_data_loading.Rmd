@@ -1,0 +1,207 @@
+---
+title: "Grun et al 2016 Human Pancreas"
+output: html_document
+---
+
+```{r}
+library(Matrix)
+library(data.table)
+#library(scRNAseq) #loads SingleCellExperiment automatically
+suppressPackageStartupMessages(library(SingleCellExperiment))
+#source("./real/util/data_loading.R")
+fp<-file.path
+bp<-"./real/grun_2016"
+```
+
+# Overview 
+This is the code to produce a *SingleCellExperiment* object of the human pancreas CEL-Seq scRNA-Seq experiment by Grun et al. (2016) and GEO accession [GSE81076](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE81076). 
+The data are available alternatively through [conquer](http://imlspenticton.uzh.ch:3838/conquer/) and the scRNAseq bioconductor package.
+
+There are 18 samples (batches). Description extracted from GEO: 
+Summary: To understand organ (dys)function it is important to have a complete inventory of its cell types and the corresponding markers that unambiguously identify these cell types. This is a challenging task, in particular in human tissues, because unique cell-type markers are typically unavailable, necessitating the analysis of complex cell type mixtures. Transcriptome-wide studies on pancreatic tissue are typically done on pooled islet material. To overcome this challenge we sequenced the transcriptome of thousands of single pancreatic cells from deceased organ donors with and without type 2 diabetes (T2D) allowing in silico purification of the different cell types. We identified the major pancreatic cell types resulting in the identification of many new cell-type specific and T2D-specific markers. Additionally we observed several subpopulations within the canonical pancreatic cell types, which we validated in situ. This resource will be useful for developing a deeper understanding of pancreatic biology and diabetes mellitus.
+
+Overall design:	Human cadaveric pancreata were used to extract islets of Langerhans, which were kept in culture until single-cell dispersion and FACS sorting. Single-cell transcriptomics was performed on live cells from this mixture using CEL-seq or on cells stained for CD63, CD13, TGFBR3 or CD24 and CD44. The RaceID algorithm was used to identify clusters of cells corresponding to the major pancreatic cell types and to mine for novel cell type-specific genes as well as subpopulations within the known pancreatic cell types.
+
+# Obtain metadata from GEO
+
+```{r}
+suppressPackageStartupMessages(library(GEOquery))
+gse <- getGEO("GSE81076")
+pdata<-do.call(rbind,lapply(gse,pData))
+#each row is a sample (plate w/ 96 cells), each column is some phenotype attribute
+write.table(pdata, file=fp(bp,"extdata/pData.txt"))
+```
+
+obtain list of valid CELSeq barcodes
+
+```{bash}
+wget ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE81nnn/GSE81076/suppl/GSE81076_cel-seq_barcodes.csv.gz -P extdata
+gunzip extdata/GSE81076_cel-seq_barcodes.csv.gz
+```
+
+```{r}
+bc<-read.table(fp(bp,"extdata/GSE81076_cel-seq_barcodes.csv"))
+write.table(bc$V2,fp(bp,"extdata/barcodes.txt"),quote=FALSE,row.names=FALSE,col.names=FALSE)
+```
+
+# Load preprocessed UMI counts and metadata
+
+From the conquer repository
+
+```{r}
+mx1<-readRDS(url("http://imlspenticton.uzh.ch/robinson_lab/conquer/data-mae/GSE81076-GPL16791.rds"))
+mx2<-readRDS(url("http://imlspenticton.uzh.ch/robinson_lab/conquer/data-mae/GSE81076-GPL18573.rds"))
+cm<-rbind(colData(mx1),colData(mx2))
+m1<-Matrix(assay(experiments(mx1)[["gene"]],"count"))
+m2<-Matrix(assay(experiments(mx2)[["gene"]],"count"))
+m<-cbind(m1,m2)
+stopifnot(all(colnames(m)==rownames(cm)))
+m<-m[rowSums(m)>0,]
+
+#separate out ERCCs and remove ENSEMBLE gene version numbers
+ercc<-grepl("^ERCC-",rownames(m))
+spike_ins<-m[ercc,]
+m<-m[!ercc,]
+g<-rownames(m)
+g2<-sub("\\.\\d+?$","",g,perl=TRUE)
+rownames(m)<-g2
+
+#convert ensembl gene names to gene symbols
+d<-as.data.table(summary(m))
+colnames(d)<-c("gene","cell","umi_count")
+d$gene<-factor(rownames(m)[d$gene])
+d$cell<-factor(colnames(m)[d$cell])
+bm<-biomaRt::useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+bml<-biomaRt::getBM(filters="ensembl_gene_id",attributes=c("ensembl_gene_id","hgnc_symbol"),values=rownames(m),mart=bm)
+d<-merge(d,bml,by.x="gene",by.y="ensembl_gene_id")
+d<-d[,.(umi_ct=sum(umi_count)),.(cell,hgnc_symbol)]
+d$gene<-factor(d$hgnc_symbol); d$cell<-factor(d$cell)
+i<-as.integer(d$gene); j<-as.integer(d$cell)
+umi<-sparseMatrix(i=i,j=j,x=d$umi_ct)
+rownames(umi)<-levels(d$gene)
+colnames(umi)<-levels(d$cell)
+umi<-umi[-1,] #exclude gene name "" which means no gene symbol
+umi<-umi[,colSums(umi)>0] #exclude cells with no counts
+
+#create single cell experiment object
+sce<-SingleCellExperiment(assays=list(counts=umi),colData=cm[colnames(umi),])
+altExp(sce,"ERCC")<-SummarizedExperiment(spike_ins[,colnames(umi)])
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+# Generating read counts and UMI counts from FASTQ
+
+NOTE- this did not work. The generated UMI counts matrix had very low counts, as well as missing cells and genes that seemed totally inconsistent with the preprocessed data from bioconductor as well as conquer. We couldn't figure out why this was happening so we just used the pre-processed version of the data and gave up on getting the read counts.
+
+## Organize metadata for compatibility with SRA IDs
+
+From the bioconductor scRNASeq package
+```{r}
+#sce <- GrunPancreasData(ensembl=FALSE)
+#cm<-colData(sce)
+```
+
+match SRA IDs to naming convention of the bioconductor dataset.
+
+```{r}
+pdata<-read.table(fp(bp,"extdata/pData.txt"),header=TRUE)
+pdata<-pdata[,c("title","geo_accession","cell.type.ch1","library.ch1")]
+rownames(pdata)<-NULL
+g2s<-read.csv(fp(bp,"extdata/SraRunInfo.csv"))[,c("SampleName","Run")]
+pdata<-merge(pdata,g2s,by.x="geo_accession",by.y="SampleName")
+x<-as.character(pdata$title)
+x<-gsub("Donor number ","D",x,fixed=TRUE)
+a<-regmatches(x, regexpr(",*\\s", x,perl=TRUE), invert = TRUE)
+a<-as.data.frame(t(matrix(unlist(a),nrow=2)))
+colnames(a)<-c("donor","sample")
+a$sample<-gsub("  "," ",a$sample,fixed=TRUE)
+setequal(a$donor,cm$donor)
+setequal(a$sample,cm$sample)
+a$sra_id<-pdata$Run
+cm$rowname_base<-gsub("_\\d+","",rownames(cm),perl=TRUE)
+b<-cm[!duplicated(cm),]
+rownames(b)<-NULL
+a<-merge(a,b)
+write.table(a,fp(bp,"extdata/pData_merged.txt"),row.names=FALSE)
+```
+
+```{r}
+pdata<-read.table(fp(bp,"extdata/pData_merged.txt"),header=TRUE)
+bc<-read.table(fp(bp,"extdata/GSE81076_cel-seq_barcodes.csv"))
+colnames(bc)<-c("id","barcode")
+
+#generate colnames that match bioconductor object
+f<-function(i){
+  cnames<-bc
+  cnames$sra_id<-pdata$sra_id[i]
+  cnames$cname<-paste0(pdata$rowname_base[i],"_",cnames$id)
+  cnames
+}
+cnames<-do.call(rbind,lapply(seq_len(nrow(pdata)),f))
+cm<-merge(cnames,pdata,by="sra_id")
+rownames(cm)<-cm$cname
+cm$id<-cm$rowname_base<-NULL
+
+#sce <- GrunPancreasData(ensembl=FALSE)
+#gg<-rownames(sce)
+```
+
+## Getting FASTQ files from SRA
+
+The information which connects the sample information from GEO with the SRA run id is downloaded from [SRA](https://www.ncbi.nlm.nih.gov/sra?term=SRP074299) using the **Send to: File button**.
+
+```{r}
+spp<-list("Homo_sapiens_GRCh38.idx")
+names(spp)<-c("Homo sapiens")
+
+parse_sra_csv(bp,"CELSeq",spp,gz=FALSE) #from ../util/data_loading.R
+```
+
+## Processing FASTQs into BUS files with Kallisto
+
+Refer to *../util/preprocessing.Rmd* for how to download the files, convert to fastq format, pseudoalign with kallisto, and process the resulting bus files with bustools so they can be parsed into a counts matrix. Note: Kallisto version 0.46.2 was used for this dataset.
+
+## Load gene counts into sparse matrix
+
+```{r}
+f<-function(i){
+  coo<-fread(fp(bp,"data/original/genecounts",paste0(i,".txt")))
+  coo$sra_id<-i
+  coo
+}
+dat<-rbindlist(lapply(cm$sra_id,f))
+
+#check if total UMI counts seem reasonable
+dd<-dat[,.(total_umi=sum(umi_ct),total_rd=sum(read_ct)),.(sra_id,bc)]
+dd$valid_bc<-dd$bc %in% bc$barcode
+
+#convert ENSEMBL names to gene symbols
+bm<-biomaRt::useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+bml<-biomaRt::getBM(filters="ensembl_gene_id",attributes=c("ensembl_gene_id","hgnc_symbol"),values=unique(dat$gene),mart=bm)
+dat<-merge(dat,bml,by.x="gene",by.y="ensembl_gene_id")
+dat<-dat[,.(umi_ct=sum(umi_ct),read_ct=sum(read_ct)),.(sra_id,bc,hgnc_symbol)]
+
+#make column names consistent between counts and metadata
+colnames(dat)[colnames(dat)=="bc"]<-"barcode"
+dat<-merge(dat,cm[,c("sra_id","barcode","cname")])
+
+#create sparse count matrices
+dat$gene<-factor(dat$hgnc_symbol); dat$id<-factor(dat$cname)
+i<-as.integer(dat$gene); j<-as.integer(dat$id)
+umi<-sparseMatrix(i=i,j=j,x=dat$umi_ct)
+rd<-sparseMatrix(i=i,j=j,x=dat$read_ct)
+rownames(umi)<-rownames(rd)<-levels(dat$gene)
+colnames(umi)<-colnames(rd)<-levels(dat$id)
+
+#make SingleCellExperiment object
+cm$cname<-NULL #it's already stored as rownames
+cm<-cm[colnames(umi),]
+sce<-SingleCellExperiment(assays=list(counts=umi,read_counts=rd),colData=cm)
+saveRDS(sce,file=fp(bp,"data/00_sce_all_genes_all_cells_unrounded.rds"))
+
+umi2<-round(umi)
+gg<-rowSums(umi2)>0
+rd2<-round(rd)
+sce2<-SingleCellExperiment(assays=list(counts=umi2[gg,],read_counts=rd2[gg,]),colData=cm2)
+saveRDS(sce2,file=fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```

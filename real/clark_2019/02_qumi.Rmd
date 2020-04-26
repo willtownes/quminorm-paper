@@ -1,0 +1,130 @@
+---
+title: "Quasi-UMIs for Clark 2019 10x Chromium V2 mouse retina"
+author: "Will Townes"
+output: html_document
+---
+
+Estimate poisson-lomax, poisson-lognormal, and negative binomial (poisson-gamma) parameters for each cell
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(ggplot2); theme_set(theme_bw())
+source("./algs/quminorm.R") #also loads nblomax.R
+source("./algs/poilog.R")
+fp<-file.path
+bp<-"./real/clark_2019"
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)) dir.create(plt_dir,recursive=TRUE)
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/02_sce_subset_p14.rds"))
+cm<-colData(sce)
+m<-counts(sce)
+```
+
+## Exploratory log-log plots
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal and negative binomial
+
+```{r}
+plt_name<-"lpmf_llcurve_clark.pdf"
+set.seed(101)
+i<-sample.int(ncol(m),1)
+cm[i,] #sample: P14, barcode: CCTATTACACCGTTGG-1, a Rod cell
+x<-m[,i]
+
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=2000))
+(th3<-nb_mle(x))
+res<-lpmf(x,doplot=FALSE)
+xmax<-expm1(1.1*max(res$x))
+ymin<-1.1*min(res$y)
+
+fpoilog<-function(t){
+  sads::dpoilog(floor(exp(t)),mu=th[1],sig=th[2],log=TRUE)
+}
+fplomax<-function(t){
+  dplomax(floor(exp(t)),tail=th2[1],scale=th2[2],log=TRUE,quadpts=5000)
+}
+fnb<-function(t){
+  dnbinom(floor(exp(t)),size=th3[1],mu=th3[2],log=TRUE)
+}
+
+pdf(file=fp(plt_dir,plt_name),width=4,height=4)
+marpar<-par("mar"); par(mar=c(4,4,.5,.5))
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(ymin,0),xlim=c(-log(2),log(xmax)),cex=2,lwd=3)
+curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=3)
+curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=3,lty=2)
+curve(fnb,from=log(1),to=log(xmax),add=TRUE,col="red",lwd=3,lty=3)
+points(rep(-log(2),3),c(fpoilog(-Inf),fplomax(-Inf),fnb(-Inf)),col=c("blue","green","red"),pch=c(1,1,19),cex=c(1.6,.9,.4),lwd=3)
+legend("topright",c("Poisson-lognormal","Poisson-Lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=3)
+par(mar=marpar)
+dev.off()
+```
+
+## Compute MLEs for all cells 
+
+`time Rscript ./real/util/mles_qumi.R ./real/clark_2019 data/02_sce_subset_p14.rds` 
+or 
+`sbatch -J clark ./real/util/mles_qumi.slurm ./real/clark_2019 data/02_sce_subset_p14.rds`
+
+## Goodness of fit 
+
+### BIC
+
+```{r}
+pd<-read.table(fp(bp,"results/mle_merged.txt"),header=TRUE)
+ln<-subset(pd,method=="poilog")
+lx<-subset(pd,method=="poilomax")
+nb<-subset(pd,method=="negbinom")
+#when is poilog best?
+mean(ln$bic<pmin(lx$bic,nb$bic))
+#when is poisson-lomax best?
+mean(lx$bic<pmin(ln$bic,nb$bic))
+#nb best?
+mean(nb$bic<pmin(ln$bic,lx$bic))
+with(pd,boxplot(bic~method,log="y")) #very small differences
+```
+
+Based on BIC, in 10% of cells, Poisson-lognormal fits best. In 90% of cells Poisson-lomax fits best. In 0% of cells, negative binomial fits best. The overall differences between methods are very small according to BIC.
+
+### Predictive check based on simulated maxima
+
+See *real/zhao_2019/02_qumi.Rmd* for details.
+
+```{r}
+cpmax<-read.table(fp(bp,"results/compare_maxima.txt"),header=TRUE)
+cpmax$log_err<-log(cpmax$sim_max)-log(cpmax$true_max)
+ggplot(cpmax,aes(x=log_err))+geom_histogram()+facet_wrap(~method,scales="free")
+```
+
+All three methods underestimate the maximum. Negative binomial is the worst, followed by Poisson-lognormal, and Poisson-Lomax is the best.
+
+## Distributions of parameter estimates (MLEs)
+
+```{r}
+pd<-read.table(fp(bp,"results/mle_merged.txt"),header=TRUE)
+sce<-readRDS(fp(bp,"data/02_sce_subset_p14.rds"))
+sce<-sce[,as.character(unique(pd$cell))]
+cm<-colData(sce)
+m<-counts(sce)
+cm$cell<-rownames(cm)
+pd<-merge(pd,as.data.frame(cm),by="cell")
+```
+
+```{r}
+ggplot(pd,aes(x=shape))+geom_histogram(bins=100)+facet_wrap(~method,scales="free")+scale_x_log10()
+for(m in levels(pd$method)){
+  print(m)
+  print(summary(pd$shape[pd$method==m]))
+}
+```
+
+For neg binom, the size parameter distribution is unimodal and values range from 0.005-0.1. For poisson-lognormal the sig parameter distribution is unimodal, ranging from about 1.7 to 2.1. For poisson-lomax the tail parameter distribution is unimodal with values ranging from 1.0 to 2.0.
+
+* nb size median: 0.02
+* poilog sigma median: 1.9
+* poilomax tail median: 1.5

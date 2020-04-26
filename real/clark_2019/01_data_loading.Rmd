@@ -1,0 +1,63 @@
+---
+title: "Clark et al 2019 Developing Mouse Retina (10x Chromium V2)"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(Matrix)
+fp<-file.path
+bp<-"./real/clark_2019"
+```
+
+# Overview 
+This is the code to produce a *SingleCellExperiment* object of the 10x chromium V2 chemistry mouse retina experiment by Clark et al. (2019). This is a time course experiment meant to illustrate the developmental process of the retina.
+
+## Download counts matrix and other metadata
+
+The original authors have kindly provided the counts data as well as metadata for public download. The [instructions on github](https://github.com/gofflab/developing_mouse_retina_scRNASeq/blob/master/README.md) provide three dropbox links, we could not get them to work with wget so we just manually downloaded the files to data/original.
+
+[cell phenotype metadata](https://www.dropbox.com/s/y5lho9ifzoktjcs/10x_mouse_retina_development_phenotype.csv?dl=0)
+
+[gene metadata](https://www.dropbox.com/s/1mc4geu3hixrxhj/10x_mouse_retina_development_feature.csv?dl=0)
+
+[counts matrix](https://www.dropbox.com/s/6d76z4grcnaxgcg/10x_mouse_retina_development.mtx?dl=0)
+
+compress the mtx file and the phenotype file to make it easier to download/upload and take up less disk space.
+
+```{bash}
+pushd real/clark_2019
+pigz data/original/10x_mouse_retina_development.mtx
+pigz data/original/10x_mouse_retina_development_phenotype.csv
+```
+
+```{r}
+m<-readMM(gzfile(fp(bp,"data/original/10x_mouse_retina_development.mtx.gz")))
+m<-as(m,"dgCMatrix") #1.3 Gb
+cm<-read.csv(gzfile(fp(bp,"data/original/10x_mouse_retina_development_phenotype.csv.gz")))
+gm<-read.csv(fp(bp,"data/original/10x_mouse_retina_development_feature.csv"))
+gg<-rowSums(m)>0
+m<-m[gg,]; gm<-gm[gg,]
+rownames(gm)<-rownames(m)<-gm$X
+gm<-gm[,c("id","gene_short_name")]
+rownames(cm)<-colnames(m)<-cm$X
+cm<-cm[,!grepl("^Patt",colnames(cm))]
+discard<-c("X","Size_Factor","num_genes_expressed","used_for_pseudotime","pattern_match","newCellType")
+cm<-cm[,!(colnames(cm) %in% discard)]
+sce<-SingleCellExperiment(assays=list(counts=m),colData=cm,rowData=gm)
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+create a subset of the original dataset containing only the most developed retinas (age P14).
+
+```{r}
+#sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+cm<-colData(sce)
+sce2<-sce[,cm$age=="P14"]
+m<-counts(sce2)
+gg<-rowSums(m)>0
+sce2<-sce2[gg,]
+saveRDS(sce2,fp(bp,"data/02_sce_subset_p14.rds"))
+```
+
+optionally, can remove all the files in data/original at this point to save disk space.

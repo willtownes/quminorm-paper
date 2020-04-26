@@ -1,0 +1,38 @@
+---
+title: "Grun et al 2016 Human Pancreas"
+output: html_document
+---
+
+Trying to figure out if Kallisto is discarding reads with "N" in the cell barcode
+
+CEL-Seq has the cell barcode in the first read. It's the first 8 bases.
+
+```{bash}
+mkdir -p data/original/debug
+#copy subset of example fastq file to debug folder
+#cp data/original/fastq/SRR3472983* data/original/debug
+head -n 40000 data/original/fastq/SRR3472983_1.fastq > data/original/debug/test1.fastq
+head -n 40000 data/original/fastq/SRR3472983_2.fastq > data/original/debug/test2.fastq
+```
+
+GSM2142263 has the cell (barcode: GCTCATCG) with the highest total counts. The corresponding SRA ID is SRR3472983
+
+make list of cell barcodes manually from fastq file
+
+```{bash}
+#separate out the sequence lines from the auxiliary fastq stuff
+#separate out only the first 8 bases which contain the cell barcodes
+awk 'NR % 4 == 2' data/original/debug/test1.fastq | cut -c 1-8 > data/original/debug/test1_seq.txt
+
+#number of reads in the fastq file: 13,004,694
+grep "^@SRR3472983" data/original/debug/test1.fastq | wc -l
+#run kallisto bus, it prints out how many reads were successfully processed
+kallisto bus -x CELSeq -t 8 -i ~/sc-rna-seq/resources/Homo_sapiens_GRCh38.idx -o data/original/debug/kallisto data/original/debug/test1_corrected.fastq data/original/debug/test2.fastq
+```
+
+Kallisto bus output only includes 2,307,233 reads pseudoaligned (17.7% of the total reads)
+on the subset test1.fastq: processed 10,000 reads, 1,789 reads pseudoaligned.
+
+We will now try to manually correct all barcodes with masked bases ("N") in the fastq to the nearest valid barcode. The python script `barcode_correct.py` reads in the fastq and prints out the same fastq with corrected barcodes
+
+conclusion: it made no difference to pre-correct the cell barcodes.

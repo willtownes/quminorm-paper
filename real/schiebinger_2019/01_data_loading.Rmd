@@ -1,0 +1,71 @@
+---
+title: "Schiebinger et al 2019 Fibroblast to iPSC Differentiation"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages(library(DropletUtils))
+library(Matrix)
+fp<-file.path
+bp<-"./real/schiebinger_2019"
+```
+
+# Overview 
+This is the code to produce a *SingleCellExperiment* object of the 10x chromium V2 mouse fibroblast to iPSC differentiation scRNA-Seq experiment by Schiebinger et al. (2019) and GEO accession [GSE115943](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE115943). 
+
+This is a large dataset with around 250,000 cells. It is a time course experiment with many samples, including replicates at the same time points, over an 18 day period of differentiation of fibroblasts into iPSCs. There are 126 samples. The protocol was 10x chromium V2 chemistry.
+
+**We will only use the four samples with completely differentiated iPSCs**
+
+Description extracted from GEO: 
+Summary: We collected duplicate samples at the various time points, generated single cell suspensions and performed scRNA-Seq. We also collected samples from established iPSC lines reprogrammed from the same MEFs, maintained in either 2i or serum conditions. Overall, we profiled ~250,000 cells.
+  	
+Overall design:	We collected scRNA-seq profiles of 250,00 cells across a 18-day time course of iPSC induction, under two conditions: 2i and serum.
+
+## Obtain metadata from GEO
+
+```{r}
+suppressPackageStartupMessages(library(GEOquery))
+gse <- getGEO("GSE115943")
+pdata<-do.call(rbind,lapply(gse,pData))
+#each row is a sample (multiple cells), each column is some phenotype attribute
+if(!dir.exists(fp(bp,"extdata"))){ dir.create(fp(bp,"extdata")) }
+write.table(pdata, file=fp(bp,"extdata/pData.txt"))
+```
+
+## Download counts matrix and other metadata
+
+We only include the four samples with completely differentiated iPSCs
+
+```{r}
+#pdata<-read.table(fp(bp,"extdata/pData.txt"))
+cm<-pdata[,c("title","geo_accession","cell.types.ch1","strain.ch1")]
+rownames(cm)<-NULL
+cm<-subset(cm,grepl("^DiPSC_",title)) #subsets the samples to incl only 4
+cm$dlpath<-paste0("ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3195nnn/",cm$geo_accession,"/suppl/",cm$geo_accession,"_",cm$title,"_gene_bc_mat.h5")
+cm$localpath<-fp(bp,"data/original",paste0(cm$title,".h5"))
+for(i in seq_len(nrow(cm))){
+  download.file(cm$dlpath[i],cm$localpath[i])
+}
+```
+
+Load with DropletUtils, it will combine all samples into a SingleCellExperiment with counts stored as a DelayedMatrix (ie the counts remain stored in the HDF5 files, not loaded directly into memory).
+
+```{r}
+sce<-read10xCounts(cm$localpath,sample.names=cm$title,col.names=FALSE,version="2",genome="mm10")
+#convert counts to a sparse Matrix, easier to work with in-memory
+m<-as(counts(sce), "dgCMatrix") #takes up about 440 Mb
+counts(sce)<-m
+#get rid of genes that are all zero
+gg<-rowSums(m)>0
+sce<-sce[gg,]
+rm(m)
+#merge column metadata with info from GEO
+cdat<-colData(sce)
+cdat<-merge(cdat,cm[,c("title","geo_accession")],by.x="Sample",by.y="title")
+colData(sce)<-cdat
+colnames(sce)<-paste0(cdat$Sample,"_",cdat$Barcode)
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```
+
+optionally, can remove all the HDF5 files in data/original at this point to save disk space.

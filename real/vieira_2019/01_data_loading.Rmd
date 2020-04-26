@@ -1,0 +1,159 @@
+---
+title: "Vieira Braga et al 2019 Human Lung"
+output: html_document
+---
+
+```{r}
+library(Matrix)
+source("./real/util/data_loading.R") #automatically loads data.table
+fp<-file.path
+bp<-"./real/vieira_2019"
+```
+
+# Overview 
+This is the code to produce a *SingleCellExperiment* object of the human lung Drop-seq scRNA-Seq experiment by Vieira Braga et al. (2019) and GEO accession [GSE130148](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE130148). 
+
+There are 4 samples from 4 donors. We will only use sample 1 (a heavy smoker) and sample 3 (a nonsmoker). 
+
+Description extracted from GEO: 
+Summary: Fresh resected human lung tissue (parenchymal lung and distal airway specimens) was obtained via the CPC BioArchive at the Comprehensive Pneumology Center Munich (CPC-M, Munich, Germany) and profiled using single cell RNA sequencing technology (Drop-seq). In total, we analysed parenchymal tissue of uninvolved areas of tumour resection material from four patients.
+  	
+Overall design:	Fresh resected human lung tissue (parenchymal lung and distal airway specimens) was obtained from four patients and profiled using single cell RNA sequencing technology (Drop-seq).
+
+# Obtain metadata from GEO and SRA
+
+obtain list of valid Drop-seq barcodes used by original authors
+
+```{bash}
+wget ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE130nnn/GSE130148/suppl/GSE130148_barcodes_cell_types.txt.gz -P extdata
+gunzip extdata/GSE130148_barcodes_cell_types.txt.gz
+```
+
+The information which connects the sample information from GEO with the SRA run id is downloaded manually from [SRA](https://www.ncbi.nlm.nih.gov/sra?term=SRP193360) using the **Send to: File button**. We place this CSV file in the *extdata* subfolder.
+
+Merge and organize column metadata (1. the GEO phenodata, 2. the mapping from GEO ID to SRA ID, 3. the cell barcodes and cell type labels from original authors).
+
+```{r}
+suppressPackageStartupMessages(library(GEOquery))
+gse <- getGEO("GSE130148")
+pdata<-do.call(rbind,lapply(gse,pData))
+#each row is a sample (plate w/ 96 cells), each column is some phenotype attribute
+if(!dir.exists(fp(bp,"extdata"))){ dir.create(fp(bp,"extdata")) }
+write.table(pdata, file=fp(bp,"extdata/pData.txt"))
+
+#load cell barcodes metadata
+bc<-read.table(fp(bp,"extdata/GSE130148_barcodes_cell_types.txt"),sep="\t",header=TRUE)
+#strip away the sample-specific prefixes such as "ASK454_"
+bc$barcode<-sub(".+?_","",bc$cell.barcode,perl=TRUE)
+bcwl<-unique(bc$barcode)
+write.table(bcwl,fp(bp,"extdata/barcodes.txt"),quote=FALSE,row.names=FALSE,col.names=FALSE)
+
+#organize column metadata
+#cm<-read.table(fp(bp,"extdata/pData.txt"),header=TRUE)
+sm<-read.csv(fp(bp,"extdata/SraRunInfo.csv"),header=TRUE)
+
+cm<-cm[,c("geo_accession",paste0("characteristics_ch1.",3:5))]
+rownames(cm)<-NULL
+sm<-sm[,c("Run","SampleName")]
+cm<-merge(cm,sm,by.x="geo_accession",by.y="SampleName")
+colnames(cm)[2:5]<-c("smoker","segment","num_cells","sra_id")
+cm$smoker<-sub("smoker: ","",cm$smoker,fixed=TRUE)
+cm$segment<-sub("segment: ","",cm$segment,fixed=TRUE)
+cm$num_cells<-as.integer(sub("number of cells: ","",cm$num_cells,fixed=TRUE))
+bc$cell.barcode<-bc$orig.ident<-bc$ID<-cm$num_cells<-NULL
+cm<-merge(bc,cm,by.x="GEO_Sample",by.y="geo_accession")
+write.table(cm,fp(bp,"extdata/colmeta.txt"),row.names=FALSE)
+```
+
+# Generating read counts and UMI counts from FASTQ
+
+generate kallisto command file from `extdata/SraRunInfo.csv`
+
+```{r}
+spp<-list("Homo_sapiens_GRCh38.idx")
+names(spp)<-c("Homo sapiens")
+
+parse_sra_csv(bp,"DropSeq",spp,gz=TRUE) #from ../util/data_loading.R
+```
+
+## Processing FASTQs into BUS files with Kallisto
+
+Refer to *../util/preprocessing.Rmd* for how to download the files, convert to fastq format, pseudoalign with kallisto, and process the resulting bus files with bustools so they can be parsed into a counts matrix. Note: Kallisto version 0.46.2 was used for this dataset.
+
+## Load gene counts into sparse matrix
+
+```{r}
+cm<-read.table(fp(bp,"extdata/colmeta.txt"),header=TRUE)
+f<-function(i){
+  coo<-fread(fp(bp,"data/original/genecounts",paste0(i,".txt")))
+  coo$sra_id<-i
+  coo
+}
+dat<-rbindlist(lapply(unique(cm$sra_id),f))
+
+#include only cells that original study used
+valid_cells<-paste0(cm$sra_id,"_",cm$barcode)
+dat<-subset(dat,paste0(sra_id,"_",bc) %in% valid_cells)
+colnames(dat)[colnames(dat)=="bc"]<-"barcode"
+#include GEO ID in dat
+dat<-merge(dat,cm[,c("sra_id","barcode","GEO_Sample")],by=c("sra_id","barcode"))
+dat$cell_id<-paste0(dat$GEO_Sample,"_",dat$barcode)
+cm$cell_id<-paste0(cm$GEO_Sample,"_",cm$barcode)
+
+#convert ENSEMBL names to gene symbols
+bm<-biomaRt::useEnsembl(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl",mirror="useast")
+bml<-biomaRt::getBM(filters="ensembl_gene_id",attributes=c("ensembl_gene_id","hgnc_symbol"),values=unique(dat$gene),mart=bm)
+dat<-merge(dat,bml,by.x="gene",by.y="ensembl_gene_id")
+dat<-dat[,.(umi_ct=sum(umi_ct),read_ct=sum(read_ct)),.(cell_id,hgnc_symbol)]
+
+#check if total UMI counts seem reasonable
+dd<-dat[,.(total_gene=length(umi_ct),total_umi=sum(umi_ct),total_rd=sum(read_ct)),.(cell_id)]
+dd<-merge(dd,cm,by="cell_id")
+plot(dd$nGene,dd$total_gene,log="xy")
+abline(0,1,col="red")
+abline(h=70,col="red") #cutoff for quality filtering
+plot(dd$nUMI,dd$total_umi,log="xy")
+abline(0,1,col="red")
+abline(h=70,col="red") #cutoff for quality filtering
+
+#make column names consistent between counts and metadata
+cm$nGene<-cm$nUMI<-cm$percent.mito<-NULL
+
+#create sparse count matrices
+dat$gene<-factor(dat$hgnc_symbol)
+dat$hgnc_symbol<-NULL
+dat$cell_id<-factor(dat$cell_id)
+i<-as.integer(dat$gene); j<-as.integer(dat$cell_id)
+umi<-sparseMatrix(i=i,j=j,x=dat$umi_ct)
+rd<-sparseMatrix(i=i,j=j,x=dat$read_ct)
+rownames(umi)<-rownames(rd)<-levels(dat$gene)
+colnames(umi)<-colnames(rd)<-levels(dat$cell_id)
+#exclude gene "" (empty string)
+keep<-rownames(umi)!=""
+umi<-umi[keep,]
+rd<-rd[keep,]
+
+#make SingleCellExperiment object
+rn<-cm$cell_id
+cm$cell_id<-NULL
+cm2<-data.frame(unclass(cm),stringsAsFactors=TRUE) #force all char->factor
+rownames(cm2)<-rn
+cm2<-cm2[colnames(umi),]
+#summary(cm2)
+sce<-SingleCellExperiment::SingleCellExperiment(assays=list(counts=umi,read_counts=rd),colData=cm2)
+saveRDS(sce,file=fp(bp,"data/00_sce_all_genes_all_cells_unrounded_unfiltered.rds"))
+
+#round to integer counts and filter out low-quality cells and genes
+umi2<-round(umi)
+#require at least 70 total UMI counts per cell
+#original publication had threshold of 200 total UMI per cell
+cc<-colSums(umi2)>70 
+umi2<-umi2[,cc]
+rd2<-round(rd[,cc])
+cm3<-cm2[cc,]
+gg<-rowSums(umi2)>0
+umi2<-umi2[gg,]
+rd2<-rd2[gg,]
+sce2<-SingleCellExperiment::SingleCellExperiment(assays=list(counts=umi2,read_counts=rd2),colData=cm3)
+saveRDS(sce2,file=fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```

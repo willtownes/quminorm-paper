@@ -1,0 +1,168 @@
+---
+title: "Quasi-UMIs for Vieira 2019"
+author: "Will Townes"
+output: html_document
+---
+
+Exploring reads vs UMIs with goal of normalizing read counts to quasi-UMIs
+
+* Estimate discrete power law distribution for many UMI samples
+* Quantile normalize read counts to quasi UMI counts
+* Compare qumi distribution to actual UMI distribution
+
+```{r}
+library(tidyverse); theme_set(theme_bw())
+suppressPackageStartupMessages(library(SingleCellExperiment))
+source("./algs/quminorm.R") #also loads nblomax.R,poilog.R
+fp<-file.path
+bp<-"./real/vieira_2019"
+
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+m<-counts(sce)
+rc<-assay(sce,"read_counts")
+```
+
+PMF of largest cell, compare poisson-lomax with poisson-lognormal
+
+```{r}
+i<-which.max(colSums(m))
+#set.seed(333)
+#i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+(th3<-nb_mle(x))
+lpmf(x,cex=2)
+llcurve_poilog(max(x),th,col="blue",lwd=2)
+llcurve_lomax(max(x),th2,lik="poi",col="green",lty=2,lwd=2,q=5000)
+llcurve_nb(max(x),th3,col="red",lty=3,lwd=2)
+legend("topright",c("poisson-lognormal","poisson-lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=2)
+```
+
+make lpmf plots for large number of random cells
+
+```{r}
+f<-function(t){
+  df<-lpmf(m[,t],doplot=FALSE)
+  df$id<-t
+  df
+}
+cc<-sample.int(ncol(m),size=1000)
+res<-do.call(rbind,lapply(cc,f))
+ggplot(res,aes(x=x,y=y,group=id))+geom_line(alpha=.2)+xlab("log(1+x)")+ylab("log(density)")
+ggsave(fp(plt_dir,"lpmf_vieira_1krandcells.pdf"),width=6,height=4)
+```
+
+### Apply QUMI to entire data matrix 
+
+First we create a configuration file (JSON) to keep track of all the shape parameters for each model.
+
+```{r}
+shp<-list(nb=.1,poilog=c(1,2),plomax=1)
+write(jsonlite::toJSON(shp,pretty=TRUE),file=fp(bp,"quminorm_script_config.json"))
+```
+
+```{bash}
+Rscript ./real/util/quminorm_script.R ./real/vieira_2019 data/01_sce_all_genes_all_cells.rds data/02_sce_qumi.rds
+```
+or 
+```{bash}
+sbatch -J vieira ./real/util/quminorm_script.slurm ./real/vieira_2019 data/01_sce_all_genes_all_cells.rds data/02_sce_qumi.rds
+```
+
+strip out any cells or genes that have a lot of NaN values, this usually only occurs with census counts.
+
+```{r}
+sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+mcc<-assay(sce2,"census_counts")
+f<-function(x){sum(is.na(x))}
+x<-apply(mcc,1,f)
+y<-apply(mcc,2,f)
+table(x>0)
+table(y>0)
+#lose less data by discarding cells, not genes
+sce2<-sce2[,y==0]
+gg<-rowSums(counts(sce2))>0
+sce2<-sce2[gg,]
+saveRDS(sce2,file=fp(bp,"data/02_sce_qumi.rds"))
+```
+
+visualize difference between QUMI counts and UMI counts
+
+```{r}
+#sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+#i<-sample.int(ncol(sce2),size=1)
+umi<-assay(sce2,"counts")[,i]
+x<-assay(sce2,"read_counts")[,i]
+#poisson-lomax qumi
+(th<-plomax_mle(umi,quadpts=1000))
+xqumi<-quminorm_plomax(x,shape=th[1],sc=th[2])
+#poisson-lognormal qumi
+(th2<-poilog_mle(umi))
+xqumi2<-quminorm_poilog(x,shape=th2[2],sc=th2[1])
+#negative binomial qumi
+(th3<-nb_mle(umi))
+xqumi3<-quminorm_nb(x,shape=th3[1],sc=th3[2])
+#plot qumi distributions and compare to actual UMI
+lpmf(xqumi,type="l",col="green",lty=2,lwd=2)
+lpmf(umi,add=TRUE,type="p",cex=2)
+lpmf(xqumi2,add=TRUE,type="l",col="blue",lty=1,lwd=2)
+lpmf(xqumi3,add=TRUE,type="l",col="red",lty=3,lwd=2)
+cc<-ceiling(assay(sce2,"census_counts")[,i])
+lpmf(cc,add=TRUE,type="l",col="orange",lty=2,lwd=2)
+legend("topright",c("negative binomial","poisson-lognormal","poisson-lomax","census counts"),lty=c(3,1,2,2),col=c("red","blue","green","orange"),lwd=2)
+title("Quasi-UMIs vs Actual UMIs")
+```
+
+```{r}
+#Poisson-lomax tends to overestimate
+plot(log1p(umi),log1p(xqumi),main="Poisson-Lomax Quasi-UMIs")
+abline(0,1)
+#neg binom tends to underestimate
+plot(log1p(umi),log1p(xqumi3),main="Negative Binomial Quasi-UMIs")
+abline(0,1)
+#Poisson-lognormal does well
+plot(log1p(umi),log1p(xqumi2),main="Poisson-Lognormal Quasi-UMIs")
+abline(0,1)
+#census counts
+plot(log1p(umi),log1p(cc),main="Census Counts")
+abline(0,1)
+```
+
+compare distances between normalizations for all cells. Using the UMI counts as a gold standard, we compute the euclidean distance between nonzero normalized counts and the UMI counts on the log scale for each normalization.
+
+```{r}
+sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+system.time(res<-distance_compare(sce2))
+write.table(res,file=fp(bp,"results/qumi_distance.txt"),quote=FALSE,row.names=FALSE)
+```
+or
+```{bash}
+Rscript ./real/util/qumi_dist_compare_script.R ./real/vieira_2019/data/02_sce_qumi.rds ./real/vieira_2019/results/qumi_distance.txt
+```
+or
+```{bash}
+sbatch -J vieira_dist_comp ./real/util/qumi_dist_compare_script.slurm ./real/vieira_2019/data/02_sce_qumi.rds ./real/vieira_2019/results/qumi_distance.txt
+```
+
+#see if quasi-UMI improves over other normalizations
+
+graphical comparison of methods. Qumis are nearly always closer to the true UMI counts than read counts or CPM.
+
+```{r}
+res<-read.table(fp(bp,"results/qumi_distance.txt"),header=TRUE,stringsAsFactors=FALSE)
+pd<-tidyr::gather(res,key="method",value="distance",-cell)
+pd<-subset(pd,method!="counts")
+pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance,na.rm=TRUE))
+o<-order(pd2$med_dist)
+pd$method<-factor(pd$method,levels=pd2$method[o])
+ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"dist_comp_vieira.pdf"),width=6,height=4)
+```

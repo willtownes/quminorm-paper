@@ -1,0 +1,181 @@
+---
+title: "Quasi-UMIs for Zhang 2019 (CEL-Seq2)"
+author: "Will Townes"
+output: html_document
+---
+
+Estimate poisson-lomax, poisson-lognormal, and negative binomial (poisson-gamma) parameters for each cell
+
+```{r}
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(ggplot2); theme_set(theme_bw())
+source("./algs/quminorm.R") #also loads nblomax.R
+source("./algs/poilog.R")
+fp<-file.path
+bp<-"./real/zhang_2019"
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)) dir.create(plt_dir,recursive=TRUE)
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+cm<-colData(sce)
+m<-counts(sce)
+```
+
+## Exploratory log-log plots
+
+PMF of random cell, compare poisson-lomax with poisson-lognormal and negative binomial
+
+```{r}
+i<-1246
+colnames(m)[i] #cell ID="S011_L4Q4_F14"
+cm$type[i] #Monocyte
+cm$disease[i] #OA=osteoarthritis
+#set.seed(222)
+#i<-sample.int(ncol(m),size=1)
+x<-m[,i]
+(th<-poilog_mle(x))
+(th2<-plomax_mle(x,quadpts=1000))
+(th3<-nb_mle(x))
+res<-lpmf(x,doplot=FALSE)
+xmax<-expm1(6.5)
+
+fpoilog<-function(t){
+  sads::dpoilog(floor(exp(t)),mu=th[1],sig=th[2],log=TRUE)
+}
+fplomax<-function(t){
+  dplomax(floor(exp(t)),tail=th2[1],scale=th2[2],log=TRUE,quadpts=5000)
+}
+fnb<-function(t){
+  dnbinom(floor(exp(t)),size=th3[1],mu=th3[2],log=TRUE)
+}
+
+pdf(file=fp(plt_dir,"lpmf_llcurve_zhang.pdf"),width=4,height=4)
+marpar<-par("mar"); par(mar=c(4,4,.5,.5))
+lpmf_xtra(res,xlab="UMI count",ylab="log(density)",connect=FALSE,ylim=c(-16,0),xlim=c(-log(2),log(xmax)),cex=2,lwd=3)
+curve(fpoilog,from=log(1),to=log(xmax),add=TRUE,col="blue",lwd=3)
+curve(fplomax,from=log(1),to=log(xmax),add=TRUE,col="green",lwd=3,lty=2)
+curve(fnb,from=log(1),to=log(xmax),add=TRUE,col="red",lwd=3,lty=3)
+points(rep(-log(2),3),c(fpoilog(-Inf),fplomax(-Inf),fnb(-Inf)),col=c("blue","green","red"),pch=c(1,1,19),cex=c(1.6,.9,.4),lwd=3)
+legend("topright",c("Poisson-lognormal","Poisson-Lomax","negative binomial"),col=c("blue","green","red"),lty=c(1,2,3),lwd=3)
+par(mar=marpar)
+dev.off()
+```
+
+## Compute MLEs for all cells 
+
+`time Rscript ./real/util/mles_qumi.R ./real/zhang_2019 data/01_sce_all_genes_all_cells.rds` 
+or 
+`sbatch -J zhang ./real/util/mles_qumi.slurm ./real/zhang_2019 data/01_sce_all_genes_all_cells.rds`
+
+## Goodness of fit 
+
+### BIC
+
+```{r}
+pd<-read.table(fp(bp,"results/mle_merged.txt"),header=TRUE)
+ln<-subset(pd,method=="poilog")
+lx<-subset(pd,method=="poilomax")
+nb<-subset(pd,method=="negbinom")
+#when is poilog best?
+mean(ln$bic<pmin(lx$bic,nb$bic))
+#when is poisson-lomax best?
+mean(lx$bic<pmin(ln$bic,nb$bic))
+#nb best?
+mean(nb$bic<pmin(ln$bic,lx$bic))
+with(pd,boxplot(bic~method)) #very small differences
+```
+
+Based on BIC, in 94% of cells, Poisson-lognormal fits best. In 5.7% of cells Poisson-lomax fits best. In 0.2% of cells, negative binomial fits best. The overall differences between methods are very small according to BIC.
+
+### Predictive check based on simulated maxima
+
+Since the BIC scores are dominated by the large number of low abundance genes, we consider a predictive test statistic to assess goodness of fit for high abundance genes. For each cell, we have a set of MLEs for parameters. From these, we simulate another cell by making n iid draws from the distribution where n is the total number of genes in the original dataset. We then compute the maximum of this random sample. The predictive test statistic is the log ratio of the simulated maximum over the true maximum from the original data. We then look at the distribution of these statistics across cells for each model (Poisson-lognormal, Poisson-Lomax, etc). If the models are well-calibrated for the maxima, the distribution should be centered at zero and be roughly symmetric.
+
+```{r}
+cpmax<-read.table(fp(bp,"results/compare_maxima.txt"),header=TRUE)
+cpmax$log_err<-log(cpmax$sim_max)-log(cpmax$true_max)
+ggplot(cpmax,aes(x=log_err))+geom_histogram()+facet_wrap(~method,scales="free")
+```
+
+Negative binomial underestimates the maximum, Poisson-lognormal is well-calibrated, and Poisson-Lomax overestimates.
+
+## Distributions of parameter estimates (MLEs)
+
+```{r}
+pd<-read.table(fp(bp,"results/mle_merged.txt"),header=TRUE)
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+sce<-sce[,as.character(unique(pd$cell))]
+cm<-colData(sce)
+m<-counts(sce)
+cm$cell<-rownames(cm)
+pd<-merge(pd,as.data.frame(cm),by="cell")
+```
+
+```{r}
+ggplot(pd,aes(x=shape))+geom_histogram(bins=100)+facet_wrap(~method,scales="free")
+ggplot(pd,aes(x=type,y=shape))+geom_boxplot()+facet_grid(~method,scales="free_x")+coord_flip()
+for(m in levels(pd$method)){
+  print(m)
+  print(summary(pd$shape[pd$method==m & pd$type=="Monocyte"]))
+}
+```
+
+For neg binom, the size parameter distribution is unimodal with a mode at about .06 and all values are less than 0.1. For poisson-lognormal the sig parameter distribution is unimodal, ranging from about 2.2 to 2.8 and the mode is 2.4. For poisson-lomax the tail parameter distribution is slightly bimodal ranging from about 0.6 to 1.8, the big mode is about 0.9 and the small mode at 1.5.
+
+There are four cell types: B cell, fibroblast, monocyte, and T cell. All of them have the same distribution except fibroblast, which has a larger negative binomial size and Poisson-lognormal sigma, but a smaller Poisson-Lomax tail parameter.
+
+Monocytes distribution: 
+* nb size median: 0.05
+* poilog sigma median: 2.36
+* poilomax tail median: 1.02
+
+### Comparing fitted MLEs to summary statistics
+
+```{r}
+# z<-log10(colSums(m))
+# plot(z,ln$sig,col=cm$type)
+# plot(z,ln$mu)
+# plot(z,ln$mu/ln$sig)
+# 
+# plot(z,lx$tail,col=cm$type)
+# plot(z,log(lx$scale))
+```
+
+## Stuff that didn't work or wasn't used
+
+### Goodness of fit by theoretical distribution of the maximum
+
+Use the sampling distribution of the maximum to assess goodness of fit. If the true maximum is close to the median of the sampling distribution, then the model fits the tail of the data well.
+
+Note: the sampling distribution of the max becomes numerically unstable for large "n" (the number of data points). The below approach didn't work very well so we decided to try a different approach based on simulation instead.
+
+```{r}
+# i<-1246
+# g<-sample.int(nrow(m),5000)
+# x<-m[g,i]
+# (th<-poilog_mle(x))
+# (th2<-plomax_mle(x,quadpts=1000))
+# (th3<-nb_mle(x))
+# 
+# xpts<-seq(from=0,to=ceiling(max(x)*10))
+# pmf<-poilog_max_pmf(xpts,length(x),th[1],th[2])
+# pmf2<-plomax_max_pmf(xpts,length(x),th2[1],th2[2],quadpts=10000)
+# pmf3<-nb_max_pmf(xpts,length(x),th3[1],th3[2])
+# plot(pmf[-1],type="l",col="blue",lwd=3)
+# lines(pmf2[-1],col="green",lty=2,lwd=3)
+# lines(pmf3[-1],col="red",lty=3,lwd=3)
+# abline(v=max(x))
+# 
+# med<-poilog_max_quantile(.5,length(x),th[1],th[2],lims=c(0,10*max(x)))
+# med2<-plomax_max_quantile(.5,length(x),th2[1],th2[2],lims=c(0,50*max(x)))
+# abline(v=med,lty=2,col="blue")
+# abline(v=med2,lty=2,col="green")
+# 
+# cdf<-poilog_max_cdf(xpts,length(x),th[1],th[2])
+# cdf2<-plomax_max_cdf(xpts,length(x),th2[1],th2[2],quadpts=10000)
+# cdf3<-nb_max_cdf(xpts,length(x),th3[1],th3[2])
+```

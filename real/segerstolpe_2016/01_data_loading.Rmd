@@ -1,0 +1,34 @@
+---
+title: "Segerstolpe et al 2016 Human Pancreas"
+output: html_document
+---
+
+```{r}
+library(Matrix)
+#scRNAseq loads SingleCellExperiment automatically
+suppressPackageStartupMessages(library(scRNAseq))
+fp<-file.path
+bp<-"./real/segerstolpe_2016"
+```
+
+This is a Smart-seq2 dataset from multiple human pancreas samples, some control and some with type II diabetes.
+
+The counts matrix is available from bioconductor package scRNAseq. We will convert it to TPM, remove low-quality cells, and store as a SingleCellExperiment object.
+
+```{r}
+sce<-SegerstolpePancreasData(ensembl=TRUE)
+keep<-colData(sce)$`single cell well quality`=="OK"
+sce<-sce[,keep]
+cm<-colData(sce)
+cm$`Source Name`<-cm$`single cell well quality`<-NULL
+colData(sce)<-cm
+gl<-as.data.frame(EDASeq::getGeneLengthAndGCContent(rownames(sce),"hg19","org.db"))
+rowData(sce)<-cbind(rowData(sce),gl)
+gg<-rowSums(counts(sce))>0 & !is.na(gl$length)
+sce<-sce[gg,]
+counts(sce)<-Matrix(counts(sce))
+tpm<-counts(sce)/rowData(sce)$length #recycling
+assay(sce,"tpm")<-t(t(tpm)/colSums(tpm))*1e6
+if(!dir.exists(fp(bp,"data"))){dir.create(fp(bp,"data"))}
+saveRDS(sce,fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+```

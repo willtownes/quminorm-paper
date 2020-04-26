@@ -1,0 +1,462 @@
+---
+title: "Quasi-UMIs for Segerstolpe 2016"
+author: "Will Townes"
+output: html_document
+---
+
+Convert TPM values to quasi-UMI counts, scran counts, and census counts. 
+
+```{r}
+library(tidyverse); theme_set(theme_bw())
+suppressPackageStartupMessages(library(SingleCellExperiment))
+library(scry) #remotes::install_github("kstreet13/scry@r3")
+library(glmpca)
+library(caret)
+source("./algs/existing.R")
+source("./algs/quminorm.R") #also loads nblomax.R,poilog.R
+ari<-mclust::adjustedRandIndex
+fp<-file.path
+bp<-"./real/segerstolpe_2016"
+
+plt_dir<-fp(bp,"results/fig")
+if(!dir.exists(plt_dir)){ dir.create(plt_dir,recursive=TRUE) }
+```
+
+data loading
+
+```{r}
+sce<-readRDS(fp(bp,"data/01_sce_all_genes_all_cells.rds"))
+#tpm<-assay(sce,"tpm")
+```
+
+## Apply QUMI to entire data matrix 
+
+Based on fitting MLEs to the Grun 2016 pancreas dataset, we use a shape parameter of 2.7 for the Poisson-lognormal as well as the default of 2.0.
+
+```{r}
+#compute scran counts with pre-clustering
+cl<-scran::quickCluster(sce,assay.type="tpm")
+sce<-scran::computeSumFactors(sce,clusters=cl,assay.type="tpm")
+sce<-scater::logNormCounts(sce,log=FALSE,exprs_values="tpm") #normcounts assay
+#compute census counts, 23 min
+system.time(sce<-census_normalize(sce,assay_name="tpm"))
+#quantile normalize to QUMIs (Poisson-lognormal), 63 min
+system.time(qm<-quminorm_matrix(assay(sce,"tpm"),shape=2.7,lik="poilog"))
+assay(sce,"qumi_poilog_2.7")<-qm
+#shape 2.0, serial processing: 14 minutes
+system.time(qm<-quminorm_matrix(assay(sce,"tpm"),shape=2.0,lik="poilog"))
+assay(sce,"qumi_poilog_2")<-qm
+saveRDS(sce,fp(bp,"data/02_sce_qumi.rds"))
+```
+
+Note, the above timings are based on the Princeton linux cluster, using a single Intel Xeon CPU E5-2660 v3 @ 2.60GHz with 125G of RAM
+
+## Dimension reduction of whole dataset
+
+We apply linear dimension reduction (PCA, GLM-PCA) with L=20 dimensions. We then regress out the covariate for the individuals to remove batch effects. The remaining significant dimensions are used as input to nonlinear dimension reductions (tSNE or UMAP). We then see whether we can recapitulate the original cell type labels.
+
+```{r}
+if(!dir.exists(fp(bp,"embeddings"))){dir.create(fp(bp,"embeddings"))}
+sce<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+
+#GLM-PCA on QUMIs
+m<-assay(sce,"qumi_poilog_2")
+system.time(fit<-glmpca(m,20,fam="nb",penalty=1,verbose=TRUE)) #1.57 hr
+saveRDS(fit,fp(bp,"embeddings/qumi2_glmpca_nb_20.rds"))
+
+#GLM-PCA on census counts
+m<-assay(sce,"census_counts")
+system.time(fit<-glmpca(m,20,fam="nb",penalty=1,verbose=TRUE)) #1.4 hr
+saveRDS(fit,fp(bp,"embeddings/census_glmpca_nb_20.rds"))
+```
+
+run PCA on QUMI and census counts, combine all embeddings into a single object
+
+```{r}
+sce<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+
+#organize metadata
+cm<-as.data.frame(colData(sce))
+cm$cell.type<-sub(" cell","",cm$cell.type,fixed=TRUE)
+cm$cell<-rownames(cm)
+cm<-cm[,c("individual","cell","cell.type")]
+counter<- cm %>% group_by(cell.type) %>% summarize(ncell=length(cell))
+cm<-merge(cm,counter)
+rownames(cm)<-cm$cell
+cm<-cm[colnames(sce),]
+rownames(cm)<-NULL
+
+#load GLM-PCA embeddings from cache
+emb<-list()
+emb$qumi_glmpca<-readRDS(fp(bp,"embeddings/qumi2_glmpca_nb_20.rds"))$factors
+emb$census_glmpca<-readRDS(fp(bp,"embeddings/census_glmpca_nb_20.rds"))$factors
+
+f<-function(m){
+  cs<-colSums(m)
+  pca(t(t(m)/cs)*median(cs),20)
+}
+#PCA on QUMI counts
+system.time(emb$qumi_pca<-f(assay(sce,"qumi_poilog_2"))) #1 min
+#PCA on census counts
+system.time(emb$census_pca<-f(assay(sce,"census_counts"))) #1 min
+
+#regress out the individual, use as input to tSNE and umap
+set.seed(222)
+viz<-list()
+for(i in names(emb)){
+  emb[[i]]<-residuals(lm(as.matrix(emb[[i]])~cm$individual))
+  tfit<-tsne(t(emb[[i]]),2,pca=FALSE)
+  #colnames(tfit)<-paste0("tsne",1:2)
+  #ufit<-umap(t(emb[[i]]),2,min_dist=.1)
+  #colnames(ufit)<-paste0("umap",1:2)
+  viz[[i]]<-cbind(cm,method=i,tfit)#,ufit)
+}
+saveRDS(emb,fp(bp,"embeddings/merged_batch_corrected_L20.rds"))
+viz<-do.call(rbind,viz)
+rownames(viz)<-NULL
+write.csv(viz,fp(bp,"results/tsne.csv"),quote=FALSE,row.names=FALSE)
+```
+
+Visualize ability of different methods to distinguish cell types
+
+```{r}
+viz<-read.csv(fp(bp,"results/tsne.csv"),header=TRUE) %>% arrange(desc(ncell))
+#split out variables for normalization and dimreduce
+#mths<-t(matrix(unlist(strsplit(as.character(viz$method),"_",fixed=TRUE)),nrow=2))
+#colnames(mths)<-c("normalization","dimreduce")
+#viz<-cbind(viz,mths)
+viz$method<-factor(viz$method,levels=c("qumi_pca","qumi_glmpca","census_pca","census_glmpca"))
+#create variable to flag endocrine cells
+endocrine<-c("alpha","beta","gamma","delta","epsilon","co-expression","unclassified endocrine")
+viz$cell.type.coarse<-ifelse(viz$cell.type %in% endocrine,"endocrine","non-endocrine")
+
+#make plot of only endocrine cells (colorblind friendly palette)
+#ectypes<-c("alpha","beta","delta","gamma","epsilon","unclassified endocrine")
+viz2<- viz %>% subset(cell.type.coarse=="endocrine" & method != "census_glmpca") 
+cbPalette<-c("#E69F00","#56B4E9","#999999","#009E73","red","#0072B2","#CC79A7","#F0E442") #"#D55E00"
+ggplot(viz2,aes(x=dim1,y=dim2,colour=cell.type,size=cell.type))+geom_point()+facet_wrap(~method,scales="free",nrow=2)+scale_color_manual(values=cbPalette)+scale_size_manual(values=c(.8,1,1,1,2,1,1.5))+theme(legend.position=c(.8,.25))+xlab("tSNE 1")+ylab("tSNE 2")
+ggsave(fp(plt_dir,"tsne_endocrine.pdf"),width=5,height=5)
+
+#focus on epsilon cluster
+viz2$is_epsilon<-ifelse(viz2$cell.type=="epsilon","epsilon","not-epsilon")
+ggplot(viz2,aes(x=dim1,y=dim2,colour=is_epsilon))+geom_point()+scale_colour_manual(values=c("red","gray"))+facet_wrap(~method,nrow=2,scales="free")+theme(legend.position="none")
+```
+
+## Feature selection and null residuals on QUMI counts
+
+```{r}
+sce<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
+batch<-factor(colData(sce)$individual)
+sce<-nullResiduals(sce,assay="qumi_poilog_2",fam="binomial",type="deviance",batch=batch)
+sce<-devianceFeatureSelection(sce,assay="qumi_poilog_2",fam="binomial",batch=batch,sorted=TRUE)
+
+#change cell type labels for easier display and subsetting
+cm<-as.data.frame(colData(sce))
+cm$cell.type<-sub(" cell","",cm$cell.type,fixed=TRUE)
+cm$cell.type.coarse<-"non-endocrine"
+cm$cell.type.coarse[cm$cell.type %in% c("alpha","beta","delta","gamma","epsilon","unclassified endocrine","co-expression")]<-"endocrine"
+colData(sce)<-DataFrame(cm)
+
+saveRDS(sce,fp(bp,"data/03_sce_qumi_deviance.rds"))
+```
+
+## Analysis of endocrine cells
+
+Subset the data to include only the endocrine cells.
+
+```{r}
+sce<-readRDS(fp(bp,"data/03_sce_qumi_deviance.rds"))
+cm<-as.data.frame(colData(sce))
+sce2<-sce[,cm$cell.type.coarse=="endocrine"]
+cm<-as.data.frame(colData(sce2))
+sce2<-sce2[rowSums(counts(sce2))>0,]
+```
+
+GLM-PCA dimension reduction
+
+```{r}
+if(!dir.exists(fp(bp,"embeddings"))){dir.create(fp(bp,"embeddings"))}
+
+#GLM-PCA on QUMIs
+m<-assay(sce2,"qumi_poilog_2")
+system.time(fit<-glmpca(m,20,fam="nb",penalty=1,verbose=TRUE))
+saveRDS(fit,fp(bp,"embeddings/endocrine_qumi2_glmpca_nb_20.rds"))
+
+#GLM-PCA on census counts
+m<-assay(sce2,"census_counts")
+system.time(fit<-glmpca(m,20,fam="nb",penalty=1,verbose=TRUE)) #1.3 hr
+saveRDS(fit,fp(bp,"embeddings/endocrine_census_glmpca_nb_20.rds"))
+```
+
+PCA dimension reduction
+
+```{r}
+f<-function(m){
+  cs<-colSums(m)
+  pca(t(t(m)/cs)*median(cs),20)
+}
+#PCA on QUMI counts
+qumi_pca<-f(assay(sce2,"qumi_poilog_2"))
+#PCA on census counts
+census_pca<-f(assay(sce2,"census_counts"))
+```
+
+regress out batch effect and visualize with t-SNE
+
+```{r}
+factors<-readRDS(fp(bp,"embeddings/endocrine_qumi2_glmpca_nb_20.rds"))$factors
+#factors<-readRDS(fp(bp,"embeddings/endocrine_census_glmpca_nb_20.rds"))$factors
+#factors<-cbind(tot=colSums(assay(sce2,"qumi_poilog_2")),factors)
+factors<-residuals(lm(as.matrix(factors)~cm$individual))
+set.seed(101)
+tfit<-tsne(t(as.matrix(factors)),2,pca=FALSE)
+pd<-cbind(cm,tfit) %>% arrange(cell.type)
+pd$cell.type[pd$cell.type=="unclassified endocrine"]<-"unclassified"
+cbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#D55E00", "#0072B2","red", "#CC79A7")
+ggplot(subset(pd,!cell.type %in% c("co-expression")),aes(x=dim1,y=dim2,colour=cell.type,size=cell.type,shape=cell.type))+geom_point()+scale_color_manual(values=cbPalette,name="cell type")+scale_size_manual(values=c(.8,1,1,1,1,2),name="cell type")+scale_shape_manual(values=c(rep(16,5),17),name="cell type")+xlab("tsne 1")+ylab("tsne 2")
+ggsave(fp(plt_dir,"tsne_endocrine_only.pdf"),width=6,height=4)
+```
+
+assign unclassified cells in the reduced dimensional space
+
+```{r}
+#obtain marker gene expression profiles
+markers<-data.frame(celltypes=c("alpha","beta","gamma","delta","epsilon"),
+                    genes=c("GCG","INS","PPY","SST","GHRL"))
+m<-assay(sce2,"qumi_poilog_2")[,rownames(cm)]
+#m<-assay(sce2,"census_counts")[,rownames(cm)]
+gm<-as.data.frame(rowData(sce2))
+ra<-t(t(m)/colSums(m))
+gg<-gm$symbol %in% markers$genes
+ra<-t(as.matrix(ra[gg,]))
+gm<-gm[gg,]
+ra2<-ra/rowSums(ra)
+colnames(ra2)<-colnames(ra)<-gm$symbol
+ra<-ra[,markers$genes]
+ra2<-ra2[,markers$genes]
+
+#set up cell type labels before and after classification
+known<-c("alpha","beta","gamma","delta","epsilon","co-expression")
+unknown<-c("unclassified endocrine")
+tr_idx<-cm$cell.type %in% known
+tst_idx<-cm$cell.type %in% unknown
+cm$status<-"original"
+cm$status[tst_idx]<-"unclass"
+cm$cell.type2<-cm$cell.type
+cm$cell<-rownames(cm)
+
+#assign cell types by random forest
+#construct weights to address class imbalance?
+#give bigger weight to smaller classes
+#https://datascience.stackexchange.com/a/16467/58745
+y<-cm$cell.type[tr_idx]
+#wts<- -log(as.numeric(table(y))/length(y))
+set.seed(101)
+(fit<-train(factors[tr_idx,],y,
+           method="rf",#classwt=wts,
+           tuneGrid=data.frame(mtry=2:7)))#,
+           #trControl=trainControl("repeatedcv",10,repeats=2))
+
+cl_probs<-predict(fit,factors[tst_idx,],type="prob")
+cl_assign<-colnames(cl_probs)[apply(cl_probs,1,which.max)]
+conf<-apply(cl_probs,1,max)
+hist(conf,breaks=20)
+table(conf<.5)
+cl_assign[conf<.5]<-NA
+table(cl_assign)
+#cl_assign[is.na(cl_assign)]<-"unclear"
+cm$cell.type2[tst_idx]<-as.character(cl_assign)
+
+pd<-cbind(cm[,c("cell","status","cell.type","cell.type2")],ra)
+pd2<-subset(pd,!is.na(cell.type2) & cell.type != "co-expression")
+pd3<-pd2 %>% pivot_longer(markers$genes,names_to="gene",values_to="ra")
+pd3$gene<-factor(pd3$gene,levels=c("GCG","INS","SST","GHRL","PPY"))
+ggplot()+geom_boxplot(data=subset(pd3,status=="original"),coef=1e6,aes(x=cell.type2,y=ra,color=cell.type2)) +geom_jitter(data=subset(pd3,status=="unclass"),height=0,width=.3,size=2.5,stroke=.8,shape=1,aes(x=cell.type2,y=ra,color=cell.type2)) +facet_wrap(~gene,scales="free_y") +theme(axis.text.x=element_text(angle=20,hjust=1),legend.position=c(.85,.22)) +xlab(NULL)+ylab("marker gene relative abundance") +guides(color=guide_legend(title="cell type"))
+ggsave(fp(plt_dir,"segerstolpe_reclassify.pdf"),width=6,height=4)
+```
+
+### Classify cells based on marker genes
+
+```{r}
+markers<-data.frame(celltypes=c("alpha","beta","gamma","delta","epsilon"),
+                    genes=c("GCG","INS","PPY","SST","GHRL"))
+rdt<-rowData(sce2)
+sce3<-sce2[rdt$symbol %in% markers$genes,]
+rownames(sce3)<-rowData(sce3)$symbol
+f<-function(a){
+  m<-t(as.matrix(assay(sce3,a)))
+  ra<-m/rowSums(m)
+  cp<-apply(ra,1,which.max)
+  cc<-apply(ra,1,max)
+  res<-data.frame(method=a,celltype_pred=markers$celltypes[cp],celltype_conf=cc)
+  rownames(res)<-rownames(ra)
+  cbind(cm,res)
+}
+res<-do.call(rbind,lapply(c("tpm","census_counts","qumi_poilog_2"),f))
+res %>% subset(!(cell.type %in% c("co-expression","unclassified endocrine"))) %>% group_by(method) %>% summarize(ari=ari(cell.type,celltype_pred))
+res2<-res %>% subset(cell.type %in% c("co-expression","unclassified endocrine"))
+#with(res,table(celltype_pred,cell.type,method))
+with(subset(res,cell.type=="unclassified endocrine"),boxplot(celltype_conf~method))
+ggplot(as.data.frame(res),aes(x=celltype_pred,y=celltype_conf,fill=method))+geom_boxplot()
+```
+
+Based on adjusted Rand index, all normalizations give classifications similarly consistent with that of the original study when using marker genes. The ARI scores are .961, .961, and .963 for TPM, census, and QUMI counts respectively.
+
+### Classify cells based on pseudobulk
+
+```{r}
+d_tv<-function(x,Y){
+  #x a vector of relative abundances representing a single cell
+  #Y a matrix of pseudobulk relative abundances, each col= a cell type
+  #rows of Y must match length of x
+  #returns: a vector of total variation distances from x to each of the 
+  #cell types
+  stopifnot(length(x)==nrow(Y))
+  .5*colSums(abs(x-Y)) #recycles x
+}
+
+X<-model.matrix(~0+cm$cell.type)
+colnames(X)<-levels(factor(cm$cell.type))
+X<-X[,as.character(markers$celltypes)]
+
+f<-function(a){
+  m<-assay(sce2,a)
+  ra<-t(t(m)/colSums(m))
+  pblk<-m %*% X
+  pblk_ra<-t(t(pblk)/colSums(pblk))
+  D<-t(apply(ra,2,d_tv,pblk_ra))
+  cp<-apply(D,1,which.min)
+  cc<-1-apply(D,1,min)
+  res<-data.frame(method=a,celltype_pred=colnames(D)[cp],celltype_conf=cc)
+  cbind(cm,res)
+}
+res<-do.call(rbind,lapply(c("tpm","census_counts","qumi_poilog_2"),f))
+res %>% subset(!(cell.type %in% c("co-expression","unclassified endocrine"))) %>% group_by(method) %>% summarize(ari=ari(cell.type,celltype_pred))
+#with(res,table(celltype_pred,cell.type,method))
+ggplot(as.data.frame(res),aes(x=celltype_pred,y=celltype_conf,fill=method))+geom_boxplot()
+```
+
+QUMI counts for individual cells are more internally consistent with pseudobulk profiles defined from the same normalization based on the labels provided by the original authors. The ARI scores are .969, .967, and .990 for TPM, census, and QUMI counts respectively.
+
+### (OBSOLETE) Dimension Reduction
+
+Visualize using PCA on binomial deviance residuals and PCA on log2(1+TPM), use the individual as a covariate to remove batch effect.
+
+```{r}
+#sce2 rows are sorted in decreasing order of deviance
+qumi<-assay(sce2,"qumi_poilog_2")
+bdr<-assay(sce2,"binomial_deviance_residuals")
+bdr[is.na(bdr)]<-0
+#rs<-rowMeans(qumi)
+#bdr<-bdr[order(rs,decreasing=TRUE),]
+fit<-umap(bdr[1:2000,],pca=50)
+#fit<-pca(bdr,2)
+pd<-cbind(fit,cm)
+ggplot(subset(pd,cell.type %in% c("alpha","beta","gamma","delta","epsilon")),aes(x=dim1,y=dim2,colour=cell.type))+geom_point(size=2)
+
+Y<-log2(1+as.matrix(assay(sce2,"tpm")))
+rs<-rowMeans(Y)
+Y<-Y[order(rs,decreasing=TRUE),]
+Yr<-t(residuals(lm(t(Y)~cm$individual)))
+fit2<-umap(Yr[1:2000,],pca=50)
+pd2<-cbind(fit2,cm)
+ggplot(subset(pd2,cell.type %in% c("alpha","beta","gamma","delta","epsilon")),aes(x=dim1,y=dim2,colour=cell.type))+geom_point(size=2)
+```
+
+focus on a single individual, visualize using log2(1+TPM) and GLM-PCA
+
+```{r}
+sce<-readRDS(fp(bp,"data/03_sce_qumi_deviance.rds"))
+cm<-as.data.frame(colData(sce))
+cc<-cm$cell.type.coarse=="endocrine" & cm$individual=="HP1504901"
+sce3<-sce[,cc]
+gg<-rowSums(counts(sce3))>0
+sce3<-sce3[gg,]
+cm<-as.data.frame(colData(sce3))
+qumi<-assay(sce3,"qumi_poilog_2")
+tpm<-assay(sce3,"tpm")
+csct<-assay(sce3,"census_counts")
+
+set.seed(111)
+res<-list()
+res$qumi<-cbind(cm,method="qumi_glmpca",glmpca(qumi,2,fam="nb")$factors)
+res$census<-cbind(cm,method="census_glmpca",glmpca(csct,2,fam="nb")$factors)
+res$tpm<-cbind(cm,method="tpm_log_pca",pca(log2(1+tpm),2))
+res<-do.call(rbind,res)
+res$method<-factor(res$method,levels=c("tpm_log_pca","census_glmpca","qumi_glmpca"))
+ggplot(subset(res,cell.type %in% c("alpha","beta","gamma","delta","epsilon")),aes(x=dim1,y=dim2,colour=cell.type))+geom_point(size=2)+facet_wrap(~method,scales="free")
+ggsave(fp(plt_dir,"qumi_dimreduce_HP1504901.pdf"),width=7,height=3)
+```
+
+```{r}
+sce<-readRDS(fp(bp,"data/03_sce_qumi_deviance.rds"))
+cm<-as.data.frame(colData(sce))
+keep<-c("alpha","beta","gamma","delta","epsilon")
+cm2<-subset(cm,cell.type %in% keep)
+with(cm2,table(cell.type,individual))
+bad<-is.na(colSums(assay(sce,"qumi_poilog_2.7"))) #some cells failed to normalize
+cc<- !bad & cm$cell.type %in% keep & cm$individual=="HP1502401"
+sce3<-sce[,cc]
+gg<-rowSums(counts(sce3))>0
+sce3<-sce3[gg,]
+assayNames(sce3)[assayNames(sce3)=="normcounts"]<-"scran"
+anames<-c("tpm","scran","census_counts","qumi_poilog_2.7","qumi_poilog_2")
+
+anscombe.transform<-function(x){2*sqrt(x+3/8)}
+
+f<-function(a,L,drfunc=c("pca","umap","tsne","glmpca")){
+  #a is an assay name from sce
+  message(a)
+  drfunc<-match.arg(drfunc)
+  m0<-assay(sce3,a)
+  res<-data.frame(cell.type=colData(sce3)$cell.type)
+  res$normalization<-a
+  #res$zero_frac<-colMeans(m>0)
+  res$cell<-colnames(sce3)
+  #renormalize so all columns have same total
+  cs<-colSums(m0)
+  m<-t(t(m0)/cs)*median(cs)
+  #m<-anscombe.transform(m)
+  #filter by top 5K most variable genes
+  #gsd<-apply(m,1,function(t){sd(t)/mean(t)})
+  if(drfunc=="glmpca"){
+    #filter by top 5K genes with highest deviance
+    #gsd<-devianceFeatureSelection(m,fam="binomial")
+    #m0<-m0[order(gsd,decreasing=TRUE),]
+    factors<-glmpca(m0,L,fam="nb",penalty=1)$factors
+    return(cbind(res,factors))
+  } else if(drfunc=="pca"){
+    dimreduce_func<-function(m){pca(m,L=L,rmzero=TRUE,scale=TRUE)}
+  } else if(drfunc=="umap"){
+    dimreduce_func<-function(m){umap(as.matrix(m),L=L)}
+  } else if(drfunc=="tsne"){
+    dimreduce_func<-function(m){tsne(as.matrix(m),L=L)}
+  } else { 
+    stop("invalid dimension reduction") 
+  }
+  #m<-m[order(gsd,decreasing=TRUE),]
+  cbind(res,dimreduce_func(m))
+}
+pca_pd<-do.call(rbind,lapply(anames,f,L=2,drfunc="pca"))
+pca_pd$dimreduce<-"pca"
+w<-50
+ggplot(pca_pd,aes(x=dim1,y=dim2,colour=cell.type))+geom_point()+facet_wrap(~normalization,scales="free")#+xlim(c(-w,w))+ylim(c(-w,w))
+
+umap_pd<-do.call(rbind,lapply(anames,f,L=2,drfunc="umap"))
+umap_pd$dimreduce<-"umap"
+ggplot(umap_pd,aes(x=dim1,y=dim2,colour=cell.type))+geom_point()+facet_wrap(~normalization,scales="free")
+
+tsne_pd<-do.call(rbind,lapply(anames,f,L=2,drfunc="tsne"))
+tsne_pd$dimreduce<-"tsne"
+ggplot(tsne_pd,aes(x=dim1,y=dim2,colour=cell.type))+geom_point()+facet_wrap(~normalization,scales="free")
+
+set.seed(222)
+glmpca_pd<-do.call(rbind,lapply(c("qumi_poilog_2.7","qumi_poilog_2","census_counts"),f,L=2,drfunc="glmpca"))
+glmpca_pd$dimreduce<-"glmpca"
+ggplot(glmpca_pd,aes(x=dim1,y=dim2,colour=cell.type))+geom_point()+facet_wrap(~normalization,scales="free")
+
+pd<-rbind(pca_pd,tsne_pd,glmpca_pd)
+pd$normalization<-plyr::mapvalues(pd$normalization,from=c("census_counts","qumi_poilog"),to=c("census","qumi"))
+pd$method<-paste0(pd$normalization,"_",pd$dimreduce)
+write.table(pd,fp(bp,"results/qumi_glmpca_patel.txt"),quote=FALSE,row.names=FALSE)
+```
