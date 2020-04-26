@@ -150,7 +150,7 @@ normalize_scran_monocle<-function(sce,plot=FALSE){
     plot(log(library_size),log(sizeFactors(sce)))
     hist(sizeFactors(sce),breaks=20)
   }
-  sce<-scater::normalize(sce,"counts",return_log=FALSE,log_exprs_offset=0)
+  sce<-scater::logNormCounts(sce,"counts",log=FALSE,pseudo_count=0)
   #scran normalized expression in "normcounts" slot
   #use monocle to convert TPM to "census counts"
   cds<-newCellDataSet(as.matrix(assay(sce,"tpm")), lowerDetectionLimit=0.1, expressionFamily=tobit(Lower=0.1))
