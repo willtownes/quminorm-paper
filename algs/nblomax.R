@@ -15,6 +15,15 @@
 #library(Matrix)
 #library(slam)
 
+#x,y must be scalars!
+logspace_add<-function(x,y){ matrixStats::logSumExp(c(x,y)) }
+
+log_cumsum_exp<-function(lp){
+  #lp a vector of log probabilities
+  #returns the log of the cumulative sum of the probabilities
+  Reduce(logspace_add,lp,accumulate=TRUE)
+}
+
 dnblomax<-function(x,tail=1,scale=1,shape=1,log=FALSE,quadpts=1000){
   #Compute PMF of compound negative binomial distribution with Lomax mixing
   #shape is the negative binomial dispersion parameter
@@ -51,6 +60,21 @@ dnblomax<-function(x,tail=1,scale=1,shape=1,log=FALSE,quadpts=1000){
 }
 dglomax<-function(x,...){ dnblomax(x,shape=1,...) }
 dplomax<-function(x,...){ dnblomax(x,shape=Inf,...) }
+
+pnblomax<-function(x,tail=1,scale=1,shape=1,log.p=FALSE,quadpts=1000){
+  #compute the CDF of negative binomial-Lomax distribution at points x
+  #maximum computational efficiency when x is a sequence!
+  #we assume x consists solely of non-negative integers.
+  xpts<-seq.int(0,max(x))
+  l_pmf<-dnblomax(xpts,tail=tail,scale=scale,shape=shape,log=TRUE,quadpts=quadpts)
+  l_cdf<-log_cumsum_exp(l_pmf)
+  #below, we use x+1 as index b/c when x=0...
+  #...the lcdf value is in position 1, etc
+  res<-l_cdf[x+1]
+  if(log.p){ return(res) } else { return(exp(res)) }
+}
+pglomax<-function(x,...){ pnblomax(x,shape=1,...) }
+pplomax<-function(x,...){ pnblomax(x,shape=Inf,...) }
 
 llcurve_lomax<-function(xmax,lpar=c(1,1,1),lik=c("nb","geom","poi"),q=1000,add=TRUE,...){
   #Draw the PMF curve on log-log axes for a Discrete-Lomax distribution 
@@ -279,4 +303,43 @@ rglomax<-function(n,tail=1.01,scale=1,cut=Inf){
 rnblomax<-function(n,tail=1.01,scale=1,shape=1,cut=Inf){
   mu<-rlomax(n,tail=tail,scale=scale,logscale=FALSE,cut=cut)
   rnbinom(n,size=shape,mu=mu)
+}
+
+################### functions for working with maxima #########################
+
+# note, these functions tend to be numerically unstable for large "n"
+# recommend not using them.
+
+plomax_max_cdf<-function(xpts,n,tail,scale,logscale=FALSE,quadpts=10000){
+  #compute the CDF of the max statistic for iid Poisson-Lomaxs
+  #n=number of data points
+  #xpts=a grid of values to evaluate the PMF of the max
+  #note: n is not the length of xpts!!
+  #tail,scale: the parameters of the Poisson-Lomax distribution
+  res<- n*pplomax(xpts,tail=tail,scale=scale,log.p=TRUE,quadpts=quadpts)
+  if(logscale){ return(res) } else { return(exp(res)) }
+}
+
+plomax_max_pmf<-function(xpts,n,tail,scale,logscale=FALSE,quadpts=10000){
+  #compute the PMF of the max statistic for iid Poisson-Lomaxs
+  #n=number of data points
+  #xpts=a grid of values to evaluate the PMF of the max
+  #note: n is not the length of xpts!!
+  #tail,scale: the parameters of the Poisson-Lomax distribution
+  l_cdf<-pplomax(xpts,tail=tail,scale=scale,log.p=TRUE,quadpts=quadpts)
+  l_pmf<-dplomax(xpts,tail=tail,scale=scale,log=TRUE,quadpts=quadpts)
+  res<- log(n)+(n-1)*l_cdf+l_pmf
+  if(logscale){ return(res) } else { return(exp(res)) }
+}
+
+plomax_max_quantile<-function(q,n,tail,scale,lims=c(0,5000),quadpts=10000){
+  #compute the theoretical quantile q of the max statistic
+  #of a random sample of n data points drawn from
+  #a Poisson-lognormal distribution with parameters mu,sig
+  #q: the desired quantile to compute (eg 0.5=median)
+  xpts<-seq.int(from=lims[1],to=lims[2])
+  l_cdf<-plomax_max_cdf(xpts,n,tail,scale,logscale=TRUE,quadpts=quadpts)
+  i<-max(which(l_cdf<=log(q)))
+  if(i==length(xpts)){ stop("reached upper limit without finding quantile") }
+  xpts[i]
 }

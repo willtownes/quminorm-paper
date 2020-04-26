@@ -3,11 +3,16 @@
 #library(Matrix)
 #library(sads)
 
+# rpoilog<-function(n,mu,sig){
+#   #same as sads::rpoilog but doesn't involve the quantile function
+#   lambda<-rlnorm(n,meanlog=mu,sdlog=sig)
+#   rpois(n,lambda)
+# }
+
 dpoilog<-function(x,mu,sig,log=FALSE,quadpts=1000){
   #Compute PMF of Poisson-lognormal
+  #deprecated, use sads::dpoilog instead!
   #same functionality as poilog::dpoilog
-  #poilog::dpoilog is faster, but this func should work better for 
-  #tiny probabilities (better numerical stability)
   #mu,sig are same as in poilog::dpoilog
   #if quadpts is a number, the quadrature points are recomputed based on
   #current parameter values
@@ -124,7 +129,7 @@ nb_pzero2mu<-function(lpz,size){
   size*expm1(-lpz/size)
 }
 
-poilog_pzero2mu<-function(lpz,sig=2.5,lims=c(-100,100)){
+poilog_pzero2mu<-function(lpz,sig=2.5,lims=c(-200,200)){
   #Assuming the data follows a Poisson-lognormal
   #if we fix the 'sig' parameter to a specified value
   #we can infer the mu parameter from the fraction of zeros
@@ -145,4 +150,65 @@ poilog_pzero2mu<-function(lpz,sig=2.5,lims=c(-100,100)){
   } else { #different tail parameter for each cell
     return(mapply(inner,lpz,sig))
   }
+}
+
+################### functions for working with maxima #########################
+
+# note, these functions tend to be numerically unstable for large "n"
+# recommend not using them.
+
+poilog_max_cdf<-function(xpts,n,mu,sig,logscale=FALSE){
+  #compute the CDF of the max statistic for iid Poisson-lognormals
+  #n=number of data points
+  #xpts=a grid of values to evaluate the PMF of the max
+  #note: n is not the length of xpts!!
+  #mu,sig: the parameters of the Poisson-lognormal distribution
+  res<- n*sads::ppoilog(xpts,mu=mu,sig=sig,log.p=TRUE)
+  if(logscale){ return(res) } else { return(exp(res)) }
+}
+
+poilog_max_pmf<-function(xpts,n,mu,sig,logscale=FALSE){
+  #compute the PMF of the max statistic
+  #n=number of data points
+  #xpts=a grid of values to evaluate the PMF of the max
+  #note: n is not the length of xpts!!
+  #mu,sig: the parameters of the Poisson-lognormal distribution
+  l_cdf<-sads::ppoilog(xpts,mu=mu,sig=sig,log.p=TRUE)
+  l_pmf<-sads::dpoilog(xpts,mu=mu,sig=sig,log=TRUE)
+  res<- log(n)+(n-1)*l_cdf+l_pmf
+  if(logscale){ return(res) } else { return(exp(res)) }
+}
+
+poilog_max_quantile<-function(q,n,mu,sig,lims=c(0,1000)){
+  #compute the theoretical quantile q of the max statistic
+  #of a random sample of n data points drawn from
+  #a Poisson-lognormal distribution with parameters mu,sig
+  #q: the desired quantile to compute (eg 0.5=median)
+  xpts<-seq.int(from=lims[1],to=lims[2])
+  l_cdf<-poilog_max_cdf(xpts,n,mu,sig,logscale=TRUE)
+  i<-max(which(l_cdf<=log(q)))
+  if(i==length(xpts)){ stop("reached upper limit without finding quantile") }
+  xpts[i]
+}
+
+nb_max_cdf<-function(xpts,n,size,mu,logscale=FALSE){
+  #compute the CDF of the max statistic for iid negative binomials
+  #n=number of data points
+  #xpts=a grid of values to evaluate the PMF of the max
+  #note: n is not the length of xpts!!
+  #size,mu: the parameters of the negative binomial distribution
+  res<- n*pnbinom(xpts,size=size,mu=mu,log.p=TRUE)
+  if(logscale){ return(res) } else { return(exp(res)) }
+}
+
+nb_max_pmf<-function(xpts,n,size,mu,logscale=FALSE){
+  #compute the PMF of the max statistic for iid negative binomials
+  #n=number of data points
+  #xpts=a grid of values to evaluate the PMF of the max
+  #note: n is not the length of xpts!!
+  #size,mu: the parameters of the negative binomial distribution
+  l_cdf<-pnbinom(xpts,size=size,mu=mu,log.p=TRUE)
+  l_pmf<-dnbinom(xpts,size=size,mu=mu,log=TRUE)
+  res<- log(n)+(n-1)*l_cdf+l_pmf
+  if(logscale){ return(res) } else { return(exp(res)) }
 }

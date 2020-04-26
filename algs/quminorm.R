@@ -4,15 +4,6 @@
 source("./algs/nblomax.R")
 source("./algs/poilog.R")
 
-#x,y must be scalars!
-logspace_add<-function(x,y){ matrixStats::logSumExp(c(x,y)) }
-
-log_cumsum_exp<-function(lp){
-  #lp a vector of log probabilities
-  #returns the log of the cumulative sum of the probabilities
-  Reduce(logspace_add,lp,accumulate=TRUE)
-}
-
 make_cdf_nz<-function(thresh,dfunc,maxval=1e6){
   #dfunc=some log-pmf function accepting a single argument (the data)
   #let cdf be the cdf corresponding to dfunc
@@ -34,12 +25,16 @@ make_cdf_nz<-function(thresh,dfunc,maxval=1e6){
     #update the first pmf value by adding the max cdf to it
     lpmf[1]<-logspace_add(lpmf[1],lcdf_max)
     lcdf<-c(lcdf,log_cumsum_exp(lpmf))
-    lcdf_max<-tail(lcdf,1)
+    lcdf_tail<-tail(lcdf,2) #make sure not to change the "2", it is crucial!
+    if(diff(lcdf_tail)==0){
+      stop("CDF is not increasing, PMF function may have numerical problems!")
+    }
+    lcdf_max<-lcdf_tail[2] #lcdf_tail must be length 2!!
     lo<-hi #100
     hi<-2*hi #200
   }
   if(hi>maxval){
-    stop("Exceeded max value, pmf function may have numerical problems!")
+    stop("Exceeded max value, PMF function may have numerical problems!")
   }
   #remove extra elements of cdf that extend beyond the threshold
   k<-min(which(lcdf>lthresh,arr.ind=TRUE))
@@ -63,7 +58,7 @@ quminorm_inner<-function(xnz,cdf_nz,nnz=length(xnz)){
   targets[xmap]
 }
 
-quminorm_poilog<-function(x,shape,sc=NULL,quadpts=1000){
+quminorm_poilog<-function(x,shape,sc=NULL,quadpts=1000,err2na=TRUE){
   #shape=sig, sc=mu
   #sig,mu are params of lognormal as in poilog::dpoilog and sads::dpoilog
   #returns a quantile normalized version of the data x with zeros unchanged
@@ -81,8 +76,16 @@ quminorm_poilog<-function(x,shape,sc=NULL,quadpts=1000){
   #threshold for cdf on the regular scale such that 
   #zero truncated cdf (cdf_nz) extends beyond the 1-1/nnz threshold
   thresh<-(1-1/nnz)*(1-pmf0)+pmf0
-  cdf_nz<-make_cdf_nz(thresh,dfunc)
-  x[nzi]<-quminorm_inner(xnz,cdf_nz,nnz)
+  if(err2na){
+    cdf_nz<-tryCatch(make_cdf_nz(thresh,dfunc),error=function(e){NULL})
+  } else {
+    cdf_nz<-make_cdf_nz(thresh,dfunc)
+  }
+  if(is.null(cdf_nz)){
+    x[nzi]<-NA
+  } else {
+    x[nzi]<-quminorm_inner(xnz,cdf_nz,nnz)
+  }
   x #quantile normalized version of x
 }
 
@@ -154,7 +157,7 @@ quminorm_matrix<-function(m,shape,lik=c("poilog","plomax","nb"),quadpts=1000){
 
 scran_normalize<-function(rc){
   #rc a read counts matrix or sparse Matrix
-  sz<-scran::computeSumFactors(rc)
+  sz<-scran::calculateSumFactors(rc)
   t(t(rc)/sz)
 }
 
@@ -171,23 +174,68 @@ census_normalize<-function(sce,assay_name="cpm",...){
   sce
 }
 
-distance_compare<-function(sce0,baseline="counts"){
-  #compare the distances between all assays in sce0
-  #versus the baseline assay
-  #returns a data frame with nrows=ncol(sce0)
-  f<-function(j,baseline="counts"){
-    sce<-sce0[,j]
-    nz<-which(drop(assay(sce,baseline)>0))
-    sce<-sce[nz,]
-    g<-function(a){log(drop(assay(sce,a)))}
-    dat<-vapply(assayNames(sce),g,FUN.VALUE=rep(0.0,length(nz)))
-    as.matrix(dist(t(dat)))[,baseline]
+#this commented out function is deprecated in favor of the one below
+#I tested to make sure they give the same result
+#the function below this one is much faster!
+# distance_compare<-function(sce0,baseline="counts"){
+#   #compare the distances between all assays in sce0
+#   #versus the baseline assay
+#   #returns a data frame with nrows=ncol(sce0)
+#   f<-function(j,baseline="counts"){
+#     sce<-sce0[,j]
+#     nz<-which(drop(assay(sce,baseline)>0))
+#     sce<-sce[nz,]
+#     g<-function(a){log(drop(assay(sce,a)))}
+#     dat<-vapply(assayNames(sce),g,FUN.VALUE=rep(0.0,length(nz)))
+#     as.matrix(dist(t(dat)))[,baseline]
+#   }
+#   res<-vapply(seq_len(ncol(sce0)),f,FUN.VALUE=rep(0.0,length(assayNames(sce0))))
+#   res<-as.data.frame(t(res))
+#   res$cell<-colnames(sce0)
+#   res
+# }
+
+distance_compare<-function(sce,baseline="counts"){
+  umi<-assay(sce,baseline)
+  sparse0<-is(umi,"dgCMatrix")
+  if(sparse0){
+    umi<-Matrix::drop0(umi)
+    z<- umi>0
+    umi@x<-log(umi@x)
+  } else {
+    z<- umi>0
+    umi<-log(umi)
   }
-  res<-vapply(seq_len(ncol(sce0)),f,FUN.VALUE=rep(0.0,length(assayNames(sce0))))
-  res<-as.data.frame(t(res))
-  res$cell<-colnames(sce0)
+  an<-setdiff(assayNames(sce),baseline)
+  res<-matrix(0,nrow=ncol(sce),ncol=length(an))
+  colnames(res)<-an
+  res<-cbind(as.data.frame(res),cell=colnames(sce))
+  for(a in an){
+    m<-z*assay(sce,a) #make sure sparsity patterns agree
+    if(sparse0 && is(m,"dgCMatrix")){
+      m<-Matrix::drop0(m)
+      m@x<-log(m@x)
+      res[,a]<-sqrt(Matrix::colSums((m-umi)^2))
+    } else {
+      m<-log(m)
+      res[,a]<-sqrt(colSums((m-umi)^2,na.rm=TRUE))
+    }
+  }
   res
 }
+
+# format_qumi_assayname<-function(mod,shp){
+#   #given a QUMI model and a shape parameter value,
+#   #return a string that can be used as an assay name for storing the
+#   #QUMI normalized counts in a SingleCellExperiment object.
+#   #mod=a string like "nb", "poilog", or "plomax"
+#   #shp= the value of the shape parameter, a number
+#   #returns a string like nb-0_1 (if shape=0.1)
+#   #or poilog-2_4 (if shape=2.4)
+#   #or plomax-1 (if shape=1.0)
+#   nm<-paste0(mod,shp,sep="-")
+#   sub(".","_",nm,fixed=TRUE)
+# }
 
 ################ visualization functions ################
 
