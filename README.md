@@ -1,6 +1,10 @@
 # Quantile normalization of single-cell RNA-seq read counts without unique molecular identifiers
 
+[![DOI](https://zenodo.org/badge/217110308.svg)](https://zenodo.org/badge/latestdoi/217110308)
+
 This repository contains supporting code to facilitate reproducible analysis. For details see the [biorxiv preprint](https://www.biorxiv.org/content/10.1101/817031v1). If you find bugs please create a github issue. 
+
+The quasi-UMI normalization method is under development as a [standalone R package](https://github.com/willtownes/quminorm).
 
 The purpose of this method is to remove PCR distortion from scRNA-seq read counts by normalizing to quasi-UMIs (QUMIs). QUMIs approximate the true (unmeasured) UMI counts. Once read counts are transformed to QUMIs, the count matrix can be passed to UMI-specific methods for [feature selection and dimension reduction](https://github.com/willtownes/scrna2019).
 
