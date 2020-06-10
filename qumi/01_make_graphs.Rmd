@@ -195,8 +195,8 @@ sce2rc<-function(d){
   data.frame(dataset=d,cell=names(rc),total_read_counts=rc)
 }
 rc<-do.call(rbind,lapply(dats,sce2rc))
-pd4<-merge(pd3,rc)
-ggplot(pd4,aes(x=total_read_counts,y=distance,colour=method))+geom_point()+facet_wrap(~dataset,scales="free")+scale_y_log10()+scale_x_log10()
+pd2<-merge(pd,rc)
+ggplot(pd2,aes(x=total_read_counts,y=distance,colour=method))+geom_point()+facet_wrap(~dataset,scales="free")+scale_y_log10()+scale_x_log10()
 ```
 
 for all methods, the distance increases as total read count of a cell increases.
@@ -211,9 +211,58 @@ res2$dataset<-"zheng_2017"
 res<-rbind(res1,res2)
 res$method<-factor(res$method,levels=c("read_counts","scran_counts","census_counts","qumi_counts"))
 
-ggplot(res,aes(x=mean_a,y=mean_m))+geom_hex(color="black",fill="black",bins=200,show.legend=FALSE)+facet_grid(dataset~method,scales="free_x")+xlab("average log expression (A)")+ylab("difference in log expression versus UMI counts (M)")+geom_hline(yintercept=0,colour="red")
+#color="black",fill="black",bins=200
+plt_func<-function(pd,x,y){
+  ggplot(pd,aes_string(x=x,y=y))+
+    geom_hex(aes(fill=sqrt(..count..)),show.legend=FALSE)+
+    facet_grid(dataset~method,scales="free_x")+
+    geom_hline(yintercept=0,colour="black",size=.3)+
+    scale_fill_continuous(low="blue",high="red")
+}
+plt_func(res,"mean_a","mean_m")+
+  xlab("average log expression (A)")+
+  ylab("difference in log expression versus UMI counts (M)")
 ggsave(fp(plt_dir,"maplot_mean.pdf"),width=6,height=4)
 
-ggplot(res,aes(x=cv_a,y=cv_m))+geom_hex(color="black",fill="black",bins=200,show.legend=FALSE)+facet_grid(dataset~method,scales="free_x")+xlab("average log CV (A)")+ylab("difference in log CV versus UMI counts (M)")+geom_hline(yintercept=0,colour="red")
+plt_func(res,"cv_a","cv_m")+
+  xlab("average log CV (A)")+
+  ylab("difference in log CV versus UMI counts (M)")
 ggsave(fp(plt_dir,"maplot_cv.pdf"),width=6,height=4)
+
+#same plots but using relative abundance instead of absolute
+plt_func(res,"ra_mean_a","ra_mean_m")+
+  xlab("average log expression (A)")+
+  ylab("difference in log expression versus UMI counts (M)")
+ggsave(fp(plt_dir,"maplot_mean_ra.pdf"),width=6,height=4)
+
+plt_func(res,"ra_cv_a","ra_cv_m")+
+  xlab("average log CV (A)")+
+  ylab("difference in log CV versus UMI counts (M)")
+ggsave(fp(plt_dir,"maplot_cv_ra.pdf"),width=6,height=4)
+```
+
+Repeat the above but filtering out lowly expressed genes. To be included, a
+gene must be nonzero in at least 10% of the cells.
+
+```{r}
+res2<-subset(res,nz_pct>.1)
+plt_func(res2,"mean_a","mean_m")+
+  xlab("average log expression (A)")+
+  ylab("difference in log expression versus UMI counts (M)")
+ggsave(fp(plt_dir,"maplot_mean_gfilter10.pdf"),width=6,height=4)
+
+plt_func(res2,"cv_a","cv_m")+
+  xlab("average log CV (A)")+
+  ylab("difference in log CV versus UMI counts (M)")
+ggsave(fp(plt_dir,"maplot_cv_gfilter10.pdf"),width=6,height=4)
+
+plt_func(res2,"ra_mean_a","ra_mean_m")+
+  xlab("average log expression (A)")+
+  ylab("difference in log expression versus UMI counts (M)")
+ggsave(fp(plt_dir,"maplot_mean_ra_gfilter10.pdf"),width=6,height=4)
+
+plt_func(res2,"ra_cv_a","ra_cv_m")+
+  xlab("average log CV (A)")+
+  ylab("difference in log CV versus UMI counts (M)")
+ggsave(fp(plt_dir,"maplot_cv_ra_gfilter10.pdf"),width=6,height=4)
 ```

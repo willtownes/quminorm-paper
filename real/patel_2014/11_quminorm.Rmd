@@ -96,7 +96,7 @@ ggsave(fp(plt_dir,"normalize_patel_distr_census.pdf"),width=3,height=3)
 
 ## Dimension reduction
 
-We will examine the effects of four normalizations on dimension reduction: TPM, scran, census, and QUMIs. We will use PCA, UMAP, and GLM-PCA for dimension reduction. 
+We will examine the effects of four normalizations on dimension reduction: TPM, scran, census, and QUMIs. We will use PCA, UMAP, and GLM-PCA for dimension reduction. For PCA and UMAP, normalized counts are transformed by log2(1+norm_counts).
 
 ```{r}
 sce<-readRDS(fp(bp,"data/03_sce_filtered_cells_quminorm.rds"))

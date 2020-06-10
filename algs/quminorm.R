@@ -157,7 +157,8 @@ quminorm_matrix<-function(m,shape,lik=c("poilog","plomax","nb"),quadpts=1000){
 
 scran_normalize<-function(rc){
   #rc a read counts matrix or sparse Matrix
-  sz<-scran::calculateSumFactors(rc)
+  cl<-scran::quickCluster(rc)
+  sz<-scran::calculateSumFactors(rc,clusters=cl)
   t(t(rc)/sz)
 }
 

@@ -81,7 +81,7 @@ Show existing normalizations don't align distributions of technical replicates
 ```{r}
 set.seed(200)
 sce2<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
-cm<-colData(sce2)
+cm<-as.data.frame(colData(sce2))
 ss<-sce2[,cm$individual=="NA19098" & cm$replicate=="r3"]
 ncell<-20
 ss<-ss[,sample.int(ncol(ss),ncell)]
@@ -96,6 +96,7 @@ for(m in c("read_counts","census_counts","cpm","scran_counts","counts","qumi_poi
   res[[m]]<-do.call(rbind,lapply(seq.int(ncol(ss)),f))
 }
 pd<-do.call(rbind,res)
+pd$mth<-factor(pd$mth)
 levels(pd$mth)[levels(pd$mth)=="counts"] <- "umi_counts"
 levels(pd$mth)[levels(pd$mth)=="qumi_poilog_2.4"] <- "qumi_counts"
 lvl<-c("read_counts","umi_counts","qumi_counts","cpm","scran_counts","census_counts")
@@ -182,7 +183,7 @@ pd2<-pd %>% group_by(method) %>% summarize(med_dist=median(distance))
 o<-order(pd2$med_dist)
 pd$method<-factor(pd$method,levels=pd2$method[o])
 ggplot(pd,aes(x=method,y=distance))+geom_boxplot()+scale_y_log10()+theme(axis.text.x = element_text(angle = 15, hjust=1))+ylab("distance from UMI counts rel. abund.")
-ggsave(fp(plt_dir,"dist_comp_ra_tung.pdf"),width=6,height=4)
+#ggsave(fp(plt_dir,"dist_comp_ra_tung.pdf"),width=6,height=4)
 ```
 
 ### MA plot and CV comparison between normalizations
@@ -191,16 +192,30 @@ A reviewer suggests that the differences between QUMIs and UMIs may depend on th
 
 We also compute the MA plot contrasting the coefficients of variation instead of the average expression.
 
+We repeat both MA plot comparisons using relative abundances instead of counts.
+
 ```{r}
 sce<-readRDS(fp(bp,"data/02_sce_qumi.rds"))
 umi<-assay(sce,"counts")
+nz_ct<-rowSums(umi>0)
+nz_pct<-nz_ct/ncol(umi)
 x<-log2(rowMeans(umi))
 cv0<-log2(apply(umi,1,sd))-x
+umi_ra<-t(t(umi)/colSums(umi))
+x_ra<-log2(rowMeans(umi_ra))
+cv0_ra<-log2(apply(umi_ra,1,sd))-x_ra
 f<-function(a){
   alt<-assay(sce,a)
   y<-log2(rowMeans(alt))
   cv<-log2(apply(alt,1,sd))-y
-  data.frame(method=a,mean_a=.5*(x+y),mean_m=y-x,cv_a=.5*(cv+cv0),cv_m=cv-cv0)
+  alt_ra<-t(t(alt)/colSums(alt))
+  y_ra<-log2(rowMeans(alt_ra))
+  cv_ra<-log2(apply(alt_ra,1,sd))-y_ra
+  data.frame(method=a, nz_ct=nz_ct, nz_pct=nz_pct,
+             mean_a=.5*(x+y), mean_m=y-x,
+             cv_a=.5*(cv+cv0), cv_m=cv-cv0,
+             ra_mean_a=.5*(x_ra+y_ra), ra_mean_m=y_ra-x_ra,
+             ra_cv_a=.5*(cv_ra+cv0_ra), ra_cv_m=cv_ra-cv0_ra)
 }
 anames<-c("read_counts","qumi_poilog_2","scran_counts","census_counts")
 res<-do.call(rbind,lapply(anames,f))
@@ -209,4 +224,6 @@ write.table(res,fp(bp,"results/qumi_maplot.txt"),quote=FALSE,row.names=FALSE)
 #rownames(res)<-NULL
 ggplot(res,aes(x=mean_a,y=mean_m))+geom_point(alpha=.9,size=.5)+facet_wrap(~method,nrow=2,scales="free_x")+xlab("average log expression (A)")+ylab("difference in log expression (M)")+geom_hline(yintercept=0,colour="blue")
 ggplot(res,aes(x=cv_a,y=cv_m))+geom_point(alpha=.9,size=.5)+facet_wrap(~method,nrow=2,scales="free_x")+xlab("average log CV (A)")+ylab("difference in log CV (M)")+geom_hline(yintercept=0,colour="blue")
+ggplot(res,aes(x=ra_mean_a,y=ra_mean_m))+geom_point(alpha=.9,size=.5)+facet_wrap(~method,nrow=2,scales="free_x")+xlab("average log expression (A)")+ylab("difference in log expression (M)")+geom_hline(yintercept=0,colour="blue")
+ggplot(res,aes(x=ra_cv_a,y=ra_cv_m))+geom_point(alpha=.9,size=.5)+facet_wrap(~method,nrow=2,scales="free_x")+xlab("average log CV (A)")+ylab("difference in log CV (M)")+geom_hline(yintercept=0,colour="blue")
 ```

@@ -47,25 +47,27 @@ compare pvalues using a variety of different metrics
 
 ```{r}
 pvals<-read.table(fp(bp,"results/pvals_ciliated_endothelium_nonsmoker.txt"))
-d<-list()
-#manhattan distance
-d[["manhattan"]]<-as.matrix(Dist(t(pvals),"manhattan"))[,"counts"]
-#Kendall rank distance
-d[["kendall"]]<-as.matrix(Dist(t(pvals),"kendall"))[,"counts"]
-#Jaccard index of overlap in significantly DE genes
-f<-function(x,thresh=.05){ p.adjust(x)<thresh }
-gs<-apply(pvals,2,f)
-d[["jaccard"]]<-as.matrix(Dist(t(gs),"binary"))[,"counts"]
-g<-function(m){
-  data.frame(metric=m,normalization=names(d[[m]]),d=d[[m]])
+compare_func<-function(pvals){
+  d<-list()
+  #manhattan distance
+  d[["manhattan"]]<-as.matrix(Dist(t(pvals),"manhattan"))[,"counts"]
+  #Kendall rank distance
+  d[["kendall"]]<-as.matrix(Dist(t(pvals),"kendall"))[,"counts"]
+  #Jaccard index of overlap in significantly DE genes
+  f<-function(x,thresh=.05){ p.adjust(x)<thresh }
+  gs<-apply(pvals,2,f)
+  d[["jaccard"]]<-as.matrix(Dist(t(gs),"binary"))[,"counts"]
+  g<-function(m){
+    data.frame(metric=m,normalization=names(d[[m]]),d=d[[m]])
+  }
+  pd<-do.call(rbind,lapply(names(d),g))
+  rownames(pd)<-NULL
+  pd2<- pd %>% group_by(metric) %>% mutate(drk=rank(d)) %>% ungroup()
+  pd2<- pd2 %>% group_by(normalization) %>% summarize(rk=mean(drk)) %>% arrange(rk)
+  pd$normalization<-factor(pd$normalization,levels=pd2$normalization)
+  subset(pd,normalization!="counts")
 }
-pd<-do.call(rbind,lapply(names(d),g))
-rownames(pd)<-NULL
-pd2<- pd %>% group_by(metric) %>% mutate(drk=rank(d)) %>% ungroup()
-pd2<- pd2 %>% group_by(normalization) %>% summarize(rk=mean(drk)) %>% arrange(rk)
-pd$normalization<-factor(pd$normalization,levels=pd2$normalization)
-pd<-subset(pd,normalization!="counts")
-
+pd<-compare_func(pvals)
 ggplot(pd,aes(x=normalization,y=d))+geom_bar(stat="identity")+facet_wrap(~metric,scales="free")+theme(axis.text.x=element_text(angle=45,hjust=1))+ylab("distance from UMI counts")
 ggsave(fp(plt_dir,"vieira_pvalue_dist_barplot_all.pdf"),width=6,height=4)
 
@@ -73,4 +75,12 @@ pd2<-subset(pd,normalization %in% c("read_counts","census_counts","qumi_poilog",
 pd2$method<-plyr::mapvalues(pd2$normalization,from=c("read_counts","census_counts","qumi_poilog","qumi_poilog1"),to=c("reads","census","qumi2","qumi1"))
 ggplot(pd2,aes(x=method,y=d,fill=method))+geom_bar(stat="identity",color="black")+facet_wrap(~metric,scales="free")+theme(legend.position="none")+ylab("distance from UMI counts")
 ggsave(fp(plt_dir,"vieira_pvalue_dist_barplot.pdf"),width=7,height=3)
+
+#same plot but excluding lowly expressed genes
+pct_nz<-rowMeans(counts(sce)>0)
+pd<-compare_func(pvals[pct_nz>.1,])
+pd2<-subset(pd,normalization %in% c("read_counts","census_counts","qumi_poilog","qumi_poilog1"))
+pd2$method<-plyr::mapvalues(pd2$normalization,from=c("read_counts","census_counts","qumi_poilog","qumi_poilog1"),to=c("reads","census","qumi2","qumi1"))
+ggplot(pd2,aes(x=method,y=d,fill=method))+geom_bar(stat="identity",color="black")+facet_wrap(~metric,scales="free")+theme(legend.position="none")+ylab("distance from UMI counts")
+ggsave(fp(plt_dir,"vieira_pvalue_dist_barplot_gfilter10.pdf"),width=7,height=3)
 ```
